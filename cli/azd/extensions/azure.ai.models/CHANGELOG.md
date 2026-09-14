@@ -5,6 +5,8 @@
 
 ### Features
 
+- Added `azd ai models migrate`, which opens a local React experience for reviewing deployed model versions,
+  lifecycle status, and retirement dates across Azure OpenAI and Foundry resources in a subscription
 - Added LoRA adapter support to `create` command with `--lora-rank`, `--lora-alpha`, `--lora-target-modules`, and `--lora-dropout` flags for registering LoRA adapters (`--weight-type LoRA`)
 - `show` command now displays LoRA Configuration section (rank, alpha, target modules, dropout) for LoRA adapters
 - `list` command now shows Weight Type column to distinguish FullWeight and LoRA models
