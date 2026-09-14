@@ -7,6 +7,22 @@
 
 - Added `azd ai models migrate`, which opens a local React experience for reviewing deployed model versions,
   lifecycle status, and retirement dates across Azure OpenAI and Foundry resources in a subscription
+- Added a six-stage migration workflow. Discover compares the source deployment with an explicitly labeled
+  GPT-5.4 default target, while Assess finds existing GPT-5.4 deployments, lets users choose an existing or
+  new deployment path, and shows target lifecycle and capabilities from Azure management APIs
+- Improved large-subscription discovery with bounded parallel account scans, per-account and overall
+  timeouts, partial-result warnings, and an explicit browser timeout instead of an indefinite loading state
+- Changed deployment discovery to load Azure AI resources first and scan each resource independently, so
+  completed deployments appear immediately while pending or failed resources remain as compact table rows
+  instead of producing a page of warning banners
+- Fixed a blank page during progressive discovery when an Azure AI resource returned no deployments;
+  empty model collections now remain JSON arrays and the browser safely handles nullable responses
+- Simplified new deployment to one action; selecting it now hides existing deployments and lets users choose
+  a region and SKU while checking current model capacity and quota signals from Azure management APIs
+- Fixed regional SKU discovery to use the subscription model catalog for the selected region instead of the
+  source resource catalog; online Data Zone and regional deployment types now appear when supported
+- Labeled `OpenAI` resources as Azure OpenAI resources and `AIServices` resources as Foundry resources;
+  Foundry Projects are not used as deployment ownership or inventory boundaries
 - Added LoRA adapter support to `create` command with `--lora-rank`, `--lora-alpha`, `--lora-target-modules`, and `--lora-dropout` flags for registering LoRA adapters (`--weight-type LoRA`)
 - `show` command now displays LoRA Configuration section (rank, alpha, target modules, dropout) for LoRA adapters
 - `list` command now shows Weight Type column to distinguish FullWeight and LoRA models

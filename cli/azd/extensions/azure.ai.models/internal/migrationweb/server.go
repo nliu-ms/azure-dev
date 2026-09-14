@@ -33,6 +33,9 @@ type Server struct {
 	token          string
 }
 
+const inventoryRequestTimeout = 60 * time.Second
+const resourceRequestTimeout = 20 * time.Second
+
 func NewServer(options ServerOptions) (*Server, error) {
 	if options.Provider == nil {
 		return nil, errors.New("model provider is required")
@@ -53,8 +56,13 @@ func NewServer(options ServerOptions) (*Server, error) {
 		token:          token,
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/resources", server.authorize(server.handleResources))
+	mux.HandleFunc("POST /api/resource-models", server.authorize(server.handleResourceModels))
 	mux.HandleFunc("GET /api/models", server.authorize(server.handleModels))
 	mux.HandleFunc("GET /api/health", server.authorize(server.handleHealth))
+	mux.HandleFunc("POST /api/recommendations", server.authorize(server.handleRecommendation))
+	mux.HandleFunc("POST /api/assessments", server.authorize(server.handleAssessment))
+	mux.HandleFunc("POST /api/deployment-options", server.authorize(server.handleDeploymentOptions))
 	mux.Handle("/", assetHandler(assets()))
 	server.httpServer = &http.Server{
 		Handler:           mux,
@@ -110,12 +118,76 @@ func (s *Server) authorize(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	result, err := s.provider.ListDeployments(r.Context())
+func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), inventoryRequestTimeout)
+	defer cancel()
+	result, err := s.provider.ListResources(ctx)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error": fmt.Sprintf("Could not load Azure model deployments: %v", err),
+		status := http.StatusBadGateway
+		message := fmt.Sprintf("Could not load Azure AI resources: %v", err)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+			message = "Azure AI resource discovery timed out. Retry the scan or choose another subscription."
+		}
+		writeJSON(w, status, map[string]string{"error": message})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleResourceModels(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var resource ModelAccount
+	if err := json.NewDecoder(r.Body).Decode(&resource); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "The Azure AI resource request must contain valid JSON.",
 		})
+		return
+	}
+	resource.Name = strings.TrimSpace(resource.Name)
+	resource.Kind = strings.TrimSpace(resource.Kind)
+	resource.ResourceGroup = strings.TrimSpace(resource.ResourceGroup)
+	resource.Location = strings.TrimSpace(resource.Location)
+	resource.ResourceID = strings.TrimSpace(resource.ResourceID)
+	if resource.Name == "" ||
+		resource.Kind == "" ||
+		resource.ResourceGroup == "" ||
+		resource.Location == "" ||
+		resource.ResourceID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "name, kind, resourceGroup, location, and resourceId are required.",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), resourceRequestTimeout)
+	defer cancel()
+	result, err := s.provider.ListResourceDeployments(ctx, resource)
+	if err != nil {
+		status := http.StatusBadGateway
+		message := fmt.Sprintf("Could not load deployments for %q: %v", resource.Name, err)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+			message = fmt.Sprintf("Timed out scanning Azure AI resource %q.", resource.Name)
+		}
+		writeJSON(w, status, map[string]string{"error": message})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), inventoryRequestTimeout)
+	defer cancel()
+	result, err := s.provider.ListDeployments(ctx)
+	if err != nil {
+		status := http.StatusBadGateway
+		message := fmt.Sprintf("Could not load Azure model deployments: %v", err)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+			message = "Azure model discovery timed out. Retry the scan or use a subscription with fewer AI resources."
+		}
+		writeJSON(w, status, map[string]string{"error": message})
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -126,6 +198,101 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"status":         "ready",
 		"subscriptionId": s.subscriptionID,
 	})
+}
+
+func (s *Server) handleRecommendation(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var request ReplacementRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "The replacement request must contain valid JSON.",
+		})
+		return
+	}
+	request.ModelName = strings.TrimSpace(request.ModelName)
+	if request.ModelName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "modelName is required.",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ReplacementRecommendation{
+		SourceModel:     request.ModelName,
+		SuggestedModel:  "gpt-5.4",
+		SuggestedFormat: "OpenAI",
+		Source:          "default",
+	})
+}
+
+func (s *Server) handleAssessment(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var request AssessmentRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "The assessment request must contain valid JSON.",
+		})
+		return
+	}
+	request.ResourceGroup = strings.TrimSpace(request.ResourceGroup)
+	request.AccountName = strings.TrimSpace(request.AccountName)
+	request.TargetModel = strings.TrimSpace(request.TargetModel)
+	request.TargetFormat = strings.TrimSpace(request.TargetFormat)
+	if request.ResourceGroup == "" ||
+		request.AccountName == "" ||
+		request.TargetModel == "" ||
+		request.TargetFormat == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "resourceGroup, accountName, targetModel, and targetFormat are required.",
+		})
+		return
+	}
+
+	result, err := s.provider.AssessTarget(r.Context(), request)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": fmt.Sprintf("Could not assess the target model: %v", err),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleDeploymentOptions(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var request DeploymentOptionsRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "The deployment options request must contain valid JSON.",
+		})
+		return
+	}
+	request.ResourceGroup = strings.TrimSpace(request.ResourceGroup)
+	request.AccountName = strings.TrimSpace(request.AccountName)
+	request.Region = strings.TrimSpace(request.Region)
+	request.TargetModel = strings.TrimSpace(request.TargetModel)
+	request.TargetFormat = strings.TrimSpace(request.TargetFormat)
+	if request.ResourceGroup == "" ||
+		request.AccountName == "" ||
+		request.Region == "" ||
+		request.TargetModel == "" ||
+		request.TargetFormat == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "resourceGroup, accountName, region, targetModel, and targetFormat are required.",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), resourceRequestTimeout)
+	defer cancel()
+	result, err := s.provider.AssessDeploymentOptions(ctx, request)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": fmt.Sprintf("Could not load deployment options: %v", err),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
