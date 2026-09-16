@@ -6,35 +6,45 @@ package migrationweb
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 )
 
 type ServerOptions struct {
-	Port           int
-	SubscriptionID string
-	Provider       ModelProvider
+	Port            int
+	SubscriptionID  string
+	Provider        ModelProvider
+	PromptOptimizer PromptOptimizer
 }
 
 type Server struct {
-	listener       net.Listener
-	httpServer     *http.Server
-	subscriptionID string
-	provider       ModelProvider
-	token          string
+	listener        net.Listener
+	httpServer      *http.Server
+	subscriptionID  string
+	provider        ModelProvider
+	promptOptimizer PromptOptimizer
+	token           string
 }
 
 const inventoryRequestTimeout = 60 * time.Second
 const resourceRequestTimeout = 20 * time.Second
+const metricsRequestTimeout = 30 * time.Second
+const promptOptimizationTimeout = 120 * time.Second
+const maxEvaluationUploadBytes = 24 * 1024 * 1024
 
 func NewServer(options ServerOptions) (*Server, error) {
 	if options.Provider == nil {
@@ -50,10 +60,11 @@ func NewServer(options ServerOptions) (*Server, error) {
 	}
 
 	server := &Server{
-		listener:       listener,
-		subscriptionID: options.SubscriptionID,
-		provider:       options.Provider,
-		token:          token,
+		listener:        listener,
+		subscriptionID:  options.SubscriptionID,
+		provider:        options.Provider,
+		promptOptimizer: options.PromptOptimizer,
+		token:           token,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/resources", server.authorize(server.handleResources))
@@ -63,6 +74,9 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux.HandleFunc("POST /api/recommendations", server.authorize(server.handleRecommendation))
 	mux.HandleFunc("POST /api/assessments", server.authorize(server.handleAssessment))
 	mux.HandleFunc("POST /api/deployment-options", server.authorize(server.handleDeploymentOptions))
+	mux.HandleFunc("POST /api/deployment-metrics", server.authorize(server.handleDeploymentMetrics))
+	mux.HandleFunc("POST /api/evaluation-analysis", server.authorize(server.handleEvaluationAnalysis))
+	mux.HandleFunc("POST /api/prompt-optimization", server.authorize(server.handlePromptOptimization))
 	mux.Handle("/", assetHandler(assets()))
 	server.httpServer = &http.Server{
 		Handler:           mux,
@@ -293,6 +307,217 @@ func (s *Server) handleDeploymentOptions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleDeploymentMetrics(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var request DeploymentMetricsRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "The deployment metrics request must contain valid JSON.",
+		})
+		return
+	}
+	request.Source = normalizeMetricsDeployment(request.Source)
+	request.Target = normalizeMetricsDeployment(request.Target)
+	if !validMetricsDeployment(request.Source) || !validMetricsDeployment(request.Target) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "Source and Target resourceId, location, and deploymentName are required.",
+		})
+		return
+	}
+	if request.StartTime.IsZero() ||
+		request.EndTime.IsZero() ||
+		!request.StartTime.Before(request.EndTime) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "startTime and endTime must define a valid UTC time window.",
+		})
+		return
+	}
+	if request.EndTime.Sub(request.StartTime) > 31*24*time.Hour {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "The telemetry window cannot exceed 31 days.",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), metricsRequestTimeout)
+	defer cancel()
+	result, err := s.provider.QueryDeploymentMetrics(ctx, request)
+	if err != nil {
+		status := http.StatusBadGateway
+		message := fmt.Sprintf("Could not query Azure Monitor metrics: %v", err)
+		if responseError, ok := errors.AsType[*azcore.ResponseError](err); ok &&
+			responseError.StatusCode == http.StatusForbidden {
+			status = http.StatusForbidden
+			message = "Azure Monitor access was denied. Grant Monitoring Reader on the Source and Target accounts."
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+			message = "Azure Monitor metrics query timed out."
+		}
+		writeJSON(w, status, map[string]string{"error": message})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleEvaluationAnalysis(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxEvaluationUploadBytes)
+	if err := r.ParseMultipartForm(4 * 1024 * 1024); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "Prompt and evaluation files must be provided as multipart form data under the 24 MB limit.",
+		})
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	_, prompt, err := readUploadedFile(r, "prompt")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if len(strings.TrimSpace(string(prompt))) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "The Source prompt file is empty."})
+		return
+	}
+	evaluationName, evaluation, err := readUploadedFile(r, "evaluation")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	result, err := analyzeEvaluation(evaluationName, evaluation)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("Could not analyze %q: %v", evaluationName, err),
+		})
+		return
+	}
+	promptDigest := sha256.Sum256(prompt)
+	evaluationDigest := sha256.Sum256(evaluation)
+	result.PromptSHA256 = fmt.Sprintf("%x", promptDigest)
+	result.EvaluationSHA256 = fmt.Sprintf("%x", evaluationDigest)
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handlePromptOptimization(w http.ResponseWriter, r *http.Request) {
+	if s.promptOptimizer == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "PromptV2 is not configured for this migration session.",
+		})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxEvaluationUploadBytes)
+	if err := r.ParseMultipartForm(4 * 1024 * 1024); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "Prompt and evaluation files must be provided as multipart form data under the 24 MB limit.",
+		})
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	_, prompt, err := readUploadedFile(r, "prompt")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if len(prompt) > maxPromptBytes {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("The Source prompt exceeds the %d KB limit.", maxPromptBytes/1024),
+		})
+		return
+	}
+	evaluationName, evaluation, err := readUploadedFile(r, "evaluation")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	analysis, err := analyzeEvaluation(evaluationName, evaluation)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("Could not analyze %q: %v", evaluationName, err),
+		})
+		return
+	}
+	target := ModelDeployment{
+		ModelName: strings.TrimSpace(r.FormValue("targetModelName")),
+	}
+	optimizer := ModelDeployment{
+		AccountName:    strings.TrimSpace(r.FormValue("optimizerAccountName")),
+		ModelName:      strings.TrimSpace(r.FormValue("optimizerModelName")),
+		DeploymentName: strings.TrimSpace(r.FormValue("optimizerDeploymentName")),
+	}
+	input, err := buildPromptOptimizationInput(
+		string(prompt),
+		strings.TrimSpace(r.FormValue("sourceModelName")),
+		target,
+		optimizer,
+		analysis,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), promptOptimizationTimeout)
+	defer cancel()
+	result, err := s.promptOptimizer.Optimize(ctx, input)
+	if err != nil {
+		status := http.StatusBadGateway
+		message := fmt.Sprintf("Could not optimize the prompt: %v", err)
+		if promptError, ok := errors.AsType[*PromptV2Error](err); ok {
+			switch promptError.StatusCode {
+			case http.StatusUnauthorized, http.StatusForbidden:
+				status = http.StatusForbidden
+				message = "PromptV2 access was denied. Sign in with an identity that can access the optimizer Foundry resource."
+			case http.StatusUnprocessableEntity:
+				status = http.StatusUnprocessableEntity
+				message = "PromptV2 does not support the selected optimizer deployment or optimization request."
+			}
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+			message = "PromptV2 optimization timed out."
+		}
+		writeJSON(w, status, map[string]string{"error": message})
+		return
+	}
+	promptDigest := sha256.Sum256(prompt)
+	evaluationDigest := sha256.Sum256(evaluation)
+	result.PromptSHA256 = fmt.Sprintf("%x", promptDigest)
+	result.EvaluationSHA256 = fmt.Sprintf("%x", evaluationDigest)
+	writeJSON(w, http.StatusOK, result)
+}
+
+func readUploadedFile(r *http.Request, field string) (string, []byte, error) {
+	file, header, err := r.FormFile(field)
+	if err != nil {
+		return "", nil, fmt.Errorf("%s file is required", field)
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, maxEvaluationUploadBytes+1))
+	if err != nil {
+		return "", nil, fmt.Errorf("read %s file: %w", field, err)
+	}
+	if len(content) > maxEvaluationUploadBytes {
+		return "", nil, fmt.Errorf("%s file exceeds the 24 MB limit", field)
+	}
+	return filepath.Base(header.Filename), content, nil
+}
+
+func normalizeMetricsDeployment(deployment MetricsDeployment) MetricsDeployment {
+	deployment.ResourceID = strings.TrimSpace(deployment.ResourceID)
+	deployment.Location = strings.TrimSpace(deployment.Location)
+	deployment.DeploymentName = strings.TrimSpace(deployment.DeploymentName)
+	return deployment
+}
+
+func validMetricsDeployment(deployment MetricsDeployment) bool {
+	return deployment.ResourceID != "" &&
+		deployment.Location != "" &&
+		deployment.DeploymentName != ""
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

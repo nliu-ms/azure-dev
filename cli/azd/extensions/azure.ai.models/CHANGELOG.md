@@ -21,6 +21,18 @@
   a region and SKU while checking current model capacity and quota signals from Azure management APIs
 - Fixed regional SKU discovery to use the subscription model catalog for the selected region instead of the
   source resource catalog; online Data Zone and regional deployment types now appear when supported
+- Added the Adapt step with inherited Source/Target deployments, Source Prompt and evaluation-result uploads,
+  and local XLSX/JSON/JSONL regression analysis. The report compares evaluator pass rates, groups
+  customer-provided failure evidence, identifies quality and operational regressions, and shows case-level
+  evidence. Prompt-fixable regressions can now be sent to PromptV2 with Azure identity authentication to generate
+  an adapted prompt, review a line-level diff and change rationale, and download the candidate for validation.
+  PromptV2 uses `gpt-5.2` as a temporary compatibility target when the selected migration model is newer than the
+  optimizer's supported target enum; the migration target and deployment remain unchanged and the result is labeled
+  non-target-specific.
+  Live Azure Monitor data remains an independent enrichment over a selected UTC window, with Source/Target summary
+  metrics and time-series charts for TTFT, TBT, TTLT, Input/Output tokens, and request rate
+- Adapt now inherits and displays the Source/Target pair fixed in Discover and Assess instead of asking users
+  to select the same deployments again
 - Labeled `OpenAI` resources as Azure OpenAI resources and `AIServices` resources as Foundry resources;
   Foundry Projects are not used as deployment ownership or inventory boundaries
 - Added LoRA adapter support to `create` command with `--lora-rank`, `--lora-alpha`, `--lora-target-modules`, and `--lora-dropout` flags for registering LoRA adapters (`--weight-type LoRA`)

@@ -106,10 +106,64 @@ type DeploymentOptions struct {
 	Warnings      []string              `json:"warnings,omitempty"`
 }
 
+// DeploymentMetricsRequest identifies two deployments and the UTC comparison window.
+type DeploymentMetricsRequest struct {
+	Source    MetricsDeployment `json:"source"`
+	Target    MetricsDeployment `json:"target"`
+	StartTime time.Time         `json:"startTime"`
+	EndTime   time.Time         `json:"endTime"`
+}
+
+// MetricsDeployment identifies an Azure OpenAI deployment and its parent account.
+type MetricsDeployment struct {
+	ResourceID     string `json:"resourceId"`
+	Location       string `json:"location"`
+	DeploymentName string `json:"deploymentName"`
+}
+
+// DeploymentMetricSummary contains Azure Monitor aggregates for one deployment.
+type DeploymentMetricSummary struct {
+	DeploymentName        string         `json:"deploymentName"`
+	Requests              *float64       `json:"requests,omitempty"`
+	ErrorRequests         *float64       `json:"errorRequests,omitempty"`
+	ProcessedPromptTokens *float64       `json:"processedPromptTokens,omitempty"`
+	GeneratedTokens       *float64       `json:"generatedTokens,omitempty"`
+	AverageTTFTMS         *float64       `json:"averageTtftMs,omitempty"`
+	AverageTBTMS          *float64       `json:"averageTbtMs,omitempty"`
+	AverageTTLTMS         *float64       `json:"averageTtltMs,omitempty"`
+	Series                []MetricSeries `json:"series"`
+	Warnings              []string       `json:"warnings,omitempty"`
+}
+
+// MetricSeries contains one Azure Monitor metric time series.
+type MetricSeries struct {
+	Name   string        `json:"name"`
+	Unit   string        `json:"unit"`
+	Points []MetricPoint `json:"points"`
+}
+
+// MetricPoint contains one UTC time bucket and its aggregate value.
+type MetricPoint struct {
+	Timestamp time.Time `json:"timestamp"`
+	Value     float64   `json:"value"`
+}
+
+// DeploymentMetricsComparison contains Source and Target operational telemetry.
+type DeploymentMetricsComparison struct {
+	StartTime time.Time               `json:"startTime"`
+	EndTime   time.Time               `json:"endTime"`
+	Source    DeploymentMetricSummary `json:"source"`
+	Target    DeploymentMetricSummary `json:"target"`
+}
+
 type ModelProvider interface {
 	ListResources(ctx context.Context) (ModelResourceList, error)
 	ListResourceDeployments(ctx context.Context, resource ModelAccount) (ModelList, error)
 	ListDeployments(ctx context.Context) (ModelList, error)
 	AssessTarget(ctx context.Context, request AssessmentRequest) (TargetAssessment, error)
 	AssessDeploymentOptions(ctx context.Context, request DeploymentOptionsRequest) (DeploymentOptions, error)
+	QueryDeploymentMetrics(
+		ctx context.Context,
+		request DeploymentMetricsRequest,
+	) (DeploymentMetricsComparison, error)
 }

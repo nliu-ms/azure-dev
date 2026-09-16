@@ -13,14 +13,13 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 )
 
 type staticProvider struct {
 	result            ModelList
 	assessment        TargetAssessment
 	deploymentOptions DeploymentOptions
+	metrics           DeploymentMetricsComparison
 	err               error
 }
 
@@ -52,6 +51,13 @@ func (p staticProvider) AssessDeploymentOptions(
 	DeploymentOptionsRequest,
 ) (DeploymentOptions, error) {
 	return p.deploymentOptions, p.err
+}
+
+func (p staticProvider) QueryDeploymentMetrics(
+	context.Context,
+	DeploymentMetricsRequest,
+) (DeploymentMetricsComparison, error) {
+	return p.metrics, p.err
 }
 
 func TestServerServesAssetsAndProtectsAPI(t *testing.T) {
@@ -88,9 +94,21 @@ func TestServerServesAssetsAndProtectsAPI(t *testing.T) {
 				SKUs: []DeploymentSKUOption{{
 					Name:         "GlobalStandard",
 					QuotaName:    "OpenAI.GlobalStandard.gpt-5.4",
-					QuotaCurrent: to.Ptr(float64(10)),
-					QuotaLimit:   to.Ptr(float64(100)),
+					QuotaCurrent: new(float64(10)),
+					QuotaLimit:   new(float64(100)),
 				}},
+			},
+			metrics: DeploymentMetricsComparison{
+				StartTime: time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC),
+				EndTime:   time.Date(2026, 9, 14, 1, 0, 0, 0, time.UTC),
+				Source: DeploymentMetricSummary{
+					DeploymentName: "chat",
+					Requests:       new(float64(42)),
+				},
+				Target: DeploymentMetricSummary{
+					DeploymentName: "chat-next",
+					Requests:       new(float64(40)),
+				},
 			},
 		},
 	})
@@ -339,6 +357,42 @@ func TestServerServesAssetsAndProtectsAPI(t *testing.T) {
 		t.Fatalf(
 			"unexpected invalid deployment options status: %d",
 			invalidDeploymentOptionsResponse.StatusCode,
+		)
+	}
+
+	metricsRequest, err := http.NewRequestWithContext(
+		t.Context(),
+		http.MethodPost,
+		server.URL()+"/api/deployment-metrics",
+		bytes.NewBufferString(
+			`{"source":{"resourceId":"/subscriptions/sub/resourceGroups/rg/providers/`+
+				`Microsoft.CognitiveServices/accounts/account","location":"eastus",`+
+				`"deploymentName":"chat"},"target":{"resourceId":"/subscriptions/sub/`+
+				`resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/account",`+
+				`"location":"eastus","deploymentName":"chat-next"},`+
+				`"startTime":"2026-09-14T00:00:00Z","endTime":"2026-09-14T01:00:00Z"}`,
+		),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricsRequest.Header.Set("Authorization", "Bearer "+browserURL.Query().Get("token"))
+	metricsResponse, err := http.DefaultClient.Do(metricsRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metrics DeploymentMetricsComparison
+	if err := json.NewDecoder(metricsResponse.Body).Decode(&metrics); err != nil {
+		t.Fatal(err)
+	}
+	_ = metricsResponse.Body.Close()
+	if metricsResponse.StatusCode != http.StatusOK ||
+		metrics.Source.Requests == nil ||
+		*metrics.Source.Requests != 42 {
+		t.Fatalf(
+			"unexpected deployment metrics response: status=%d payload=%+v",
+			metricsResponse.StatusCode,
+			metrics,
 		)
 	}
 

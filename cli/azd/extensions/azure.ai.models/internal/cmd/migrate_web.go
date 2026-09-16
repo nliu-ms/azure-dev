@@ -47,11 +47,16 @@ func runMigrateWeb(
 	if err != nil {
 		return err
 	}
+	promptOptimizer, err := migrationweb.NewPromptV2Client(credential)
+	if err != nil {
+		return err
+	}
 
 	server, err := migrationweb.NewServer(migrationweb.ServerOptions{
-		Port:           flags.Port,
-		SubscriptionID: subscriptionID,
-		Provider:       provider,
+		Port:            flags.Port,
+		SubscriptionID:  subscriptionID,
+		Provider:        provider,
+		PromptOptimizer: promptOptimizer,
 	})
 	if err != nil {
 		return err

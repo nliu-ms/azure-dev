@@ -15,19 +15,19 @@ import (
 
 func TestDeploymentViewAddsLifecycleMetadata(t *testing.T) {
 	account := &armcognitiveservices.Account{
-		ID:       to.Ptr("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/account"),
-		Name:     to.Ptr("account"),
-		Kind:     to.Ptr("OpenAI"),
-		Location: to.Ptr("eastus"),
+		ID:       new("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/account"),
+		Name:     new("account"),
+		Kind:     new("OpenAI"),
+		Location: new("eastus"),
 	}
 	deployment := &armcognitiveservices.Deployment{
-		ID:   to.Ptr(accountID(account) + "/deployments/chat"),
-		Name: to.Ptr("chat"),
+		ID:   new(accountID(account) + "/deployments/chat"),
+		Name: new("chat"),
 		Properties: &armcognitiveservices.DeploymentProperties{
 			Model: &armcognitiveservices.DeploymentModel{
-				Format:  to.Ptr("OpenAI"),
-				Name:    to.Ptr("gpt-4o"),
-				Version: to.Ptr("2024-05-13"),
+				Format:  new("OpenAI"),
+				Name:    new("gpt-4o"),
+				Version: new("2024-05-13"),
 			},
 			VersionUpgradeOption: to.Ptr(
 				armcognitiveservices.DeploymentModelVersionUpgradeOptionOnceCurrentVersionExpired,
@@ -37,9 +37,9 @@ func TestDeploymentViewAddsLifecycleMetadata(t *testing.T) {
 	retirement := "2026-10-01T00:00:00Z"
 	catalog := map[string]*armcognitiveservices.AccountModel{
 		modelKey("OpenAI", "gpt-4o", "2024-05-13"): {
-			Format:          to.Ptr("OpenAI"),
-			Name:            to.Ptr("gpt-4o"),
-			Version:         to.Ptr("2024-05-13"),
+			Format:          new("OpenAI"),
+			Name:            new("gpt-4o"),
+			Version:         new("2024-05-13"),
 			LifecycleStatus: to.Ptr(armcognitiveservices.ModelLifecycleStatusDeprecating),
 			Deprecation: &armcognitiveservices.ModelDeprecationInfo{
 				Inference: &retirement,
@@ -66,27 +66,27 @@ func TestTargetAssessmentUsesDefaultVersionAndCapabilities(t *testing.T) {
 	retirement := "2027-09-02T00:00:00Z"
 	models := map[string]*armcognitiveservices.AccountModel{
 		modelKey("OpenAI", "gpt-5.4", "2026-01-01"): {
-			Format:  to.Ptr("OpenAI"),
-			Name:    to.Ptr("gpt-5.4"),
-			Version: to.Ptr("2026-01-01"),
+			Format:  new("OpenAI"),
+			Name:    new("gpt-5.4"),
+			Version: new("2026-01-01"),
 		},
 		modelKey("OpenAI", "gpt-5.4", "2026-03-05"): {
-			Format:           to.Ptr("OpenAI"),
-			Name:             to.Ptr("gpt-5.4"),
-			Version:          to.Ptr("2026-03-05"),
-			IsDefaultVersion: to.Ptr(true),
+			Format:           new("OpenAI"),
+			Name:             new("gpt-5.4"),
+			Version:          new("2026-03-05"),
+			IsDefaultVersion: new(true),
 			LifecycleStatus:  to.Ptr(armcognitiveservices.ModelLifecycleStatusGenerallyAvailable),
 			Deprecation: &armcognitiveservices.ModelDeprecationInfo{
 				Inference: &retirement,
 			},
 			Capabilities: map[string]*string{
-				"responses": to.Ptr("true"),
+				"responses": new("true"),
 			},
 			SKUs: []*armcognitiveservices.ModelSKU{{
-				Name: to.Ptr("GlobalStandard"),
+				Name: new("GlobalStandard"),
 				Capacity: &armcognitiveservices.CapacityConfig{
-					Default: to.Ptr(int32(10)),
-					Maximum: to.Ptr(int32(1_000_000)),
+					Default: new(int32(10)),
+					Maximum: new(int32(1_000_000)),
 				},
 			}},
 		},
@@ -116,9 +116,9 @@ func TestTargetAssessmentUsesDefaultVersionAndCapabilities(t *testing.T) {
 func TestSelectTargetModelReturnsNilWhenTargetIsUnavailable(t *testing.T) {
 	models := map[string]*armcognitiveservices.AccountModel{
 		modelKey("OpenAI", "gpt-4o", "2024-05-13"): {
-			Format:  to.Ptr("OpenAI"),
-			Name:    to.Ptr("gpt-4o"),
-			Version: to.Ptr("2024-05-13"),
+			Format:  new("OpenAI"),
+			Name:    new("gpt-4o"),
+			Version: new("2024-05-13"),
 		},
 	}
 
@@ -130,16 +130,16 @@ func TestSelectTargetModelReturnsNilWhenTargetIsUnavailable(t *testing.T) {
 func TestSelectTargetModelUsesRequestedExistingDeploymentVersion(t *testing.T) {
 	models := map[string]*armcognitiveservices.AccountModel{
 		modelKey("OpenAI", "gpt-5.4", "2026-01-01"): {
-			Format:           to.Ptr("OpenAI"),
-			Name:             to.Ptr("gpt-5.4"),
-			Version:          to.Ptr("2026-01-01"),
-			IsDefaultVersion: to.Ptr(false),
+			Format:           new("OpenAI"),
+			Name:             new("gpt-5.4"),
+			Version:          new("2026-01-01"),
+			IsDefaultVersion: new(false),
 		},
 		modelKey("OpenAI", "gpt-5.4", "2026-03-05"): {
-			Format:           to.Ptr("OpenAI"),
-			Name:             to.Ptr("gpt-5.4"),
-			Version:          to.Ptr("2026-03-05"),
-			IsDefaultVersion: to.Ptr(true),
+			Format:           new("OpenAI"),
+			Name:             new("gpt-5.4"),
+			Version:          new("2026-03-05"),
+			IsDefaultVersion: new(true),
 		},
 	}
 
@@ -153,20 +153,20 @@ func TestDeploymentOptionsMatchCapacityAndQuotaBySKU(t *testing.T) {
 	target := &armcognitiveservices.AccountModel{
 		SKUs: []*armcognitiveservices.ModelSKU{
 			{
-				Name:      to.Ptr("Standard"),
-				UsageName: to.Ptr("OpenAI.Standard.gpt-5.4"),
+				Name:      new("Standard"),
+				UsageName: new("OpenAI.Standard.gpt-5.4"),
 			},
 			{
-				Name:      to.Ptr("GlobalStandard"),
-				UsageName: to.Ptr("OpenAI.GlobalStandard.gpt-5.4"),
+				Name:      new("GlobalStandard"),
+				UsageName: new("OpenAI.GlobalStandard.gpt-5.4"),
 			},
 			{
-				Name:      to.Ptr("DataZoneStandard"),
-				UsageName: to.Ptr("OpenAI.DataZoneStandard.gpt-5.4"),
+				Name:      new("DataZoneStandard"),
+				UsageName: new("OpenAI.DataZoneStandard.gpt-5.4"),
 			},
 			{
-				Name:      to.Ptr("GlobalBatch"),
-				UsageName: to.Ptr("OpenAI.GlobalBatch.gpt-5.4"),
+				Name:      new("GlobalBatch"),
+				UsageName: new("OpenAI.GlobalBatch.gpt-5.4"),
 			},
 		},
 	}
@@ -178,14 +178,14 @@ func TestDeploymentOptionsMatchCapacityAndQuotaBySKU(t *testing.T) {
 		},
 		target,
 		map[string]*float32{
-			"globalstandard": to.Ptr(float32(120)),
+			"globalstandard": new(float32(120)),
 		},
 		map[string]*armcognitiveservices.Usage{
 			"openai.globalstandard.gpt-5.4": {
-				CurrentValue: to.Ptr(float64(20)),
-				Limit:        to.Ptr(float64(100)),
+				CurrentValue: new(float64(20)),
+				Limit:        new(float64(100)),
 				Name: &armcognitiveservices.MetricName{
-					Value: to.Ptr("OpenAI.GlobalStandard.gpt-5.4"),
+					Value: new("OpenAI.GlobalStandard.gpt-5.4"),
 				},
 			},
 		},
@@ -215,7 +215,7 @@ func TestDeploymentOptionsMatchCapacityAndQuotaBySKU(t *testing.T) {
 }
 
 func TestScanModelAccountsTimesOutSlowAccount(t *testing.T) {
-	account := &armcognitiveservices.Account{Name: to.Ptr("slow-account")}
+	account := &armcognitiveservices.Account{Name: new("slow-account")}
 	start := time.Now()
 	_, warnings := scanModelAccountsWithOptions(
 		t.Context(),
@@ -238,10 +238,10 @@ func TestScanModelAccountsTimesOutSlowAccount(t *testing.T) {
 
 func TestModelAccountViewIncludesResourceGroupAndRegion(t *testing.T) {
 	account := &armcognitiveservices.Account{
-		ID:       to.Ptr("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/ai"),
-		Name:     to.Ptr("ai"),
-		Kind:     to.Ptr("AIServices"),
-		Location: to.Ptr("eastus2"),
+		ID:       new("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/ai"),
+		Name:     new("ai"),
+		Kind:     new("AIServices"),
+		Location: new("eastus2"),
 	}
 
 	view, ok := modelAccountView(account)

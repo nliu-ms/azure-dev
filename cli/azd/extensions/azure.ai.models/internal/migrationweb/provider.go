@@ -16,6 +16,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/cognitiveservices/armcognitiveservices/v2"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
 )
 
 const (
@@ -30,6 +31,7 @@ type AzureModelProvider struct {
 	models         *armcognitiveservices.ModelsClient
 	capacities     *armcognitiveservices.LocationBasedModelCapacitiesClient
 	usages         *armcognitiveservices.UsagesClient
+	metrics        *armmonitor.MetricsClient
 }
 
 func NewAzureModelProvider(
@@ -40,6 +42,10 @@ func NewAzureModelProvider(
 	if err != nil {
 		return nil, fmt.Errorf("create Cognitive Services client: %w", err)
 	}
+	metrics, err := armmonitor.NewMetricsClient(subscriptionID, credential, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create Azure Monitor client: %w", err)
+	}
 	return &AzureModelProvider{
 		subscriptionID: subscriptionID,
 		accounts:       factory.NewAccountsClient(),
@@ -47,7 +53,359 @@ func NewAzureModelProvider(
 		models:         factory.NewModelsClient(),
 		capacities:     factory.NewLocationBasedModelCapacitiesClient(),
 		usages:         factory.NewUsagesClient(),
+		metrics:        metrics,
 	}, nil
+}
+
+func (p *AzureModelProvider) QueryDeploymentMetrics(
+	ctx context.Context,
+	request DeploymentMetricsRequest,
+) (DeploymentMetricsComparison, error) {
+	var source DeploymentMetricSummary
+	var target DeploymentMetricSummary
+	var sourceErr error
+	var targetErr error
+	var wait sync.WaitGroup
+	wait.Go(func() {
+		source, sourceErr = p.queryDeploymentMetrics(
+			ctx,
+			request.Source,
+			request.StartTime,
+			request.EndTime,
+		)
+	})
+	wait.Go(func() {
+		target, targetErr = p.queryDeploymentMetrics(
+			ctx,
+			request.Target,
+			request.StartTime,
+			request.EndTime,
+		)
+	})
+	wait.Wait()
+	if sourceErr != nil {
+		return DeploymentMetricsComparison{}, fmt.Errorf("query Source deployment metrics: %w", sourceErr)
+	}
+	if targetErr != nil {
+		return DeploymentMetricsComparison{}, fmt.Errorf("query Target deployment metrics: %w", targetErr)
+	}
+	return DeploymentMetricsComparison{
+		StartTime: request.StartTime,
+		EndTime:   request.EndTime,
+		Source:    source,
+		Target:    target,
+	}, nil
+}
+
+func (p *AzureModelProvider) queryDeploymentMetrics(
+	ctx context.Context,
+	deployment MetricsDeployment,
+	startTime time.Time,
+	endTime time.Time,
+) (DeploymentMetricSummary, error) {
+	filter := fmt.Sprintf(
+		"ModelDeploymentName eq '%s'",
+		strings.ReplaceAll(deployment.DeploymentName, "'", "''"),
+	)
+	timespan := fmt.Sprintf(
+		"%s/%s",
+		startTime.UTC().Format("2006-01-02T15:04:05.000Z"),
+		endTime.UTC().Format("2006-01-02T15:04:05.000Z"),
+	)
+	interval, intervalMinutes := metricsInterval(endTime.Sub(startTime))
+	options := &armmonitor.MetricsClientListOptions{
+		Filter:             new(filter),
+		Interval:           new(interval),
+		Metricnamespace:    new("Microsoft.CognitiveServices/accounts"),
+		Timespan:           new(timespan),
+		ValidateDimensions: new(true),
+	}
+	summary := DeploymentMetricSummary{
+		DeploymentName: deployment.DeploymentName,
+		Series:         []MetricSeries{},
+		Warnings:       []string{},
+	}
+
+	requestOptions := *options
+	requestOptions.Aggregation = new("total")
+	requestOptions.Filter = new(filter + " and StatusCode eq '*'")
+	requestOptions.Metricnames = new("AzureOpenAIRequests")
+	requestResponse, err := p.metrics.List(
+		ctx,
+		strings.TrimPrefix(deployment.ResourceID, "/"),
+		&requestOptions,
+	)
+	if err != nil {
+		return DeploymentMetricSummary{}, fmt.Errorf("query request metrics: %w", err)
+	}
+	applyTotalMetrics(&summary, requestResponse, intervalMinutes)
+
+	totalOptions := *options
+	totalOptions.Aggregation = new("total")
+	totalOptions.Metricnames = new(strings.Join([]string{
+		"ProcessedPromptTokens",
+		"GeneratedTokens",
+	}, ","))
+	totalResponse, err := p.metrics.List(
+		ctx,
+		strings.TrimPrefix(deployment.ResourceID, "/"),
+		&totalOptions,
+	)
+	if err != nil {
+		return DeploymentMetricSummary{}, fmt.Errorf("query count and token metrics: %w", err)
+	}
+	applyTotalMetrics(&summary, totalResponse, 1)
+
+	averageOptions := *options
+	averageOptions.Aggregation = new("average,count")
+	averageOptions.Metricnames = new(strings.Join([]string{
+		"AzureOpenAINormalizedTTFTInMS",
+		"AzureOpenAINormalizedTBTInMS",
+		"AzureOpenAITTLTInMS",
+	}, ","))
+	averageResponse, err := p.metrics.List(
+		ctx,
+		strings.TrimPrefix(deployment.ResourceID, "/"),
+		&averageOptions,
+	)
+	if err != nil {
+		summary.Warnings = append(
+			summary.Warnings,
+			fmt.Sprintf("Latency metrics could not be loaded: %v", err),
+		)
+		return summary, nil
+	}
+	applyAverageMetrics(&summary, averageResponse)
+	return summary, nil
+}
+
+func metricsInterval(duration time.Duration) (string, float64) {
+	switch {
+	case duration <= 6*time.Hour:
+		return "PT5M", 5
+	case duration <= 24*time.Hour:
+		return "PT15M", 15
+	case duration <= 7*24*time.Hour:
+		return "PT1H", 60
+	default:
+		return "PT6H", 360
+	}
+}
+
+func applyTotalMetrics(
+	summary *DeploymentMetricSummary,
+	response armmonitor.MetricsClientListResponse,
+	requestIntervalMinutes float64,
+) {
+	for _, metric := range response.Value {
+		if metric == nil || metric.Name == nil {
+			continue
+		}
+		name := value(metric.Name.Value)
+		if value(metric.ErrorCode) != "" && !strings.EqualFold(value(metric.ErrorCode), "Success") {
+			summary.Warnings = append(
+				summary.Warnings,
+				fmt.Sprintf("%s: %s", name, value(metric.ErrorMessage)),
+			)
+			continue
+		}
+		total, errors, hasStatusDimension := metricTotals(metric)
+		switch name {
+		case "AzureOpenAIRequests":
+			summary.Requests = new(total)
+			if hasStatusDimension {
+				summary.ErrorRequests = new(errors)
+			}
+			appendMetricSeries(
+				summary,
+				"requestRate",
+				"requests/min",
+				metricTotalPoints(metric, requestIntervalMinutes),
+			)
+		case "ProcessedPromptTokens":
+			summary.ProcessedPromptTokens = new(total)
+			appendMetricSeries(summary, "inputTokens", "tokens/bucket", metricTotalPoints(metric, 1))
+		case "GeneratedTokens":
+			summary.GeneratedTokens = new(total)
+			appendMetricSeries(summary, "outputTokens", "tokens/bucket", metricTotalPoints(metric, 1))
+		}
+	}
+}
+
+func applyAverageMetrics(summary *DeploymentMetricSummary, response armmonitor.MetricsClientListResponse) {
+	for _, metric := range response.Value {
+		if metric == nil || metric.Name == nil {
+			continue
+		}
+		name := value(metric.Name.Value)
+		if value(metric.ErrorCode) != "" && !strings.EqualFold(value(metric.ErrorCode), "Success") {
+			summary.Warnings = append(
+				summary.Warnings,
+				fmt.Sprintf("%s: %s", name, value(metric.ErrorMessage)),
+			)
+			continue
+		}
+		average, ok := metricAverage(metric)
+		if !ok {
+			continue
+		}
+		switch name {
+		case "AzureOpenAINormalizedTTFTInMS":
+			summary.AverageTTFTMS = new(average)
+			appendMetricSeries(summary, "ttft", "ms", metricAveragePoints(metric))
+		case "AzureOpenAINormalizedTBTInMS":
+			summary.AverageTBTMS = new(average)
+			appendMetricSeries(summary, "tbt", "ms", metricAveragePoints(metric))
+		case "AzureOpenAITTLTInMS":
+			summary.AverageTTLTMS = new(average)
+			appendMetricSeries(summary, "ttlt", "ms", metricAveragePoints(metric))
+		}
+	}
+}
+
+func appendMetricSeries(
+	summary *DeploymentMetricSummary,
+	name string,
+	unit string,
+	points []MetricPoint,
+) {
+	if len(points) == 0 {
+		return
+	}
+	summary.Series = append(summary.Series, MetricSeries{
+		Name:   name,
+		Unit:   unit,
+		Points: points,
+	})
+}
+
+func metricTotalPoints(metric *armmonitor.Metric, divisor float64) []MetricPoint {
+	values := map[time.Time]float64{}
+	for _, series := range metric.Timeseries {
+		if series == nil {
+			continue
+		}
+		for _, point := range series.Data {
+			if point == nil || point.TimeStamp == nil || point.Total == nil {
+				continue
+			}
+			values[point.TimeStamp.UTC()] += *point.Total / divisor
+		}
+	}
+	return sortedMetricPoints(values)
+}
+
+func metricAveragePoints(metric *armmonitor.Metric) []MetricPoint {
+	type weightedValue struct {
+		total  float64
+		weight float64
+	}
+	values := map[time.Time]weightedValue{}
+	for _, series := range metric.Timeseries {
+		if series == nil {
+			continue
+		}
+		for _, point := range series.Data {
+			if point == nil || point.TimeStamp == nil || point.Average == nil {
+				continue
+			}
+			pointWeight := 1.0
+			if point.Count != nil && *point.Count > 0 {
+				pointWeight = *point.Count
+			}
+			timestamp := point.TimeStamp.UTC()
+			current := values[timestamp]
+			current.total += *point.Average * pointWeight
+			current.weight += pointWeight
+			values[timestamp] = current
+		}
+	}
+	averages := make(map[time.Time]float64, len(values))
+	for timestamp, value := range values {
+		if value.weight > 0 {
+			averages[timestamp] = value.total / value.weight
+		}
+	}
+	return sortedMetricPoints(averages)
+}
+
+func sortedMetricPoints(values map[time.Time]float64) []MetricPoint {
+	points := make([]MetricPoint, 0, len(values))
+	for timestamp, value := range values {
+		points = append(points, MetricPoint{Timestamp: timestamp, Value: value})
+	}
+	slices.SortFunc(points, func(left, right MetricPoint) int {
+		return left.Timestamp.Compare(right.Timestamp)
+	})
+	return points
+}
+
+func metricTotals(metric *armmonitor.Metric) (float64, float64, bool) {
+	var total float64
+	var errorTotal float64
+	var hasStatusDimension bool
+	for _, series := range metric.Timeseries {
+		if series == nil {
+			continue
+		}
+		isError, hasStatus := metricSeriesStatus(series)
+		hasStatusDimension = hasStatusDimension || hasStatus
+		for _, point := range series.Data {
+			if point == nil || point.Total == nil {
+				continue
+			}
+			total += *point.Total
+			if isError {
+				errorTotal += *point.Total
+			}
+		}
+	}
+	return total, errorTotal, hasStatusDimension
+}
+
+func metricSeriesStatus(series *armmonitor.TimeSeriesElement) (bool, bool) {
+	if series == nil {
+		return false, false
+	}
+	for _, metadata := range series.Metadatavalues {
+		if metadata == nil {
+			continue
+		}
+		if metadata.Name == nil {
+			continue
+		}
+		name := strings.ToLower(value(metadata.Name.Value))
+		status := value(metadata.Value)
+		if strings.Contains(name, "status") {
+			return strings.HasPrefix(status, "4") || strings.HasPrefix(status, "5"), true
+		}
+	}
+	return false, false
+}
+
+func metricAverage(metric *armmonitor.Metric) (float64, bool) {
+	var weightedTotal float64
+	var weight float64
+	for _, series := range metric.Timeseries {
+		if series == nil {
+			continue
+		}
+		for _, point := range series.Data {
+			if point == nil || point.Average == nil {
+				continue
+			}
+			pointWeight := 1.0
+			if point.Count != nil && *point.Count > 0 {
+				pointWeight = *point.Count
+			}
+			weightedTotal += *point.Average * pointWeight
+			weight += pointWeight
+		}
+	}
+	if weight == 0 {
+		return 0, false
+	}
+	return weightedTotal / weight, true
 }
 
 func (p *AzureModelProvider) ListResources(ctx context.Context) (ModelResourceList, error) {
