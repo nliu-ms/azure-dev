@@ -1,7 +1,7 @@
 id: azure.ai.models
 namespace: ai.models
 displayName: Foundry Custom Models (Preview)
-description: Extension for managing custom models in Azure AI Foundry. (Preview)
+description: Extension for managing custom models and reviewing model migration timelines in Azure AI Foundry. (Preview)
 usage: azd ai models <command> [options]
 version: 0.0.7-preview
 language: go
@@ -27,3 +27,6 @@ examples:
     - name: delete
       description: Delete a custom model.
       usage: azd ai models delete --name my-model
+    - name: migrate
+      description: Open the local model migration experience and review deployed model retirement timelines.
+      usage: azd ai models migrate
