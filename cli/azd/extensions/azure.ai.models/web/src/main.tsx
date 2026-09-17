@@ -103,7 +103,8 @@ type EvidenceArtifact = {
   summary?: EvidenceSummary;
 };
 
-type EvidenceKind = "prompt" | "baseline";
+type EvidenceKind = "prompt" | "baseline" | "dataset" | "source" | "target";
+type EvidenceMode = "combined" | "bundle";
 
 type EvaluatorSummary = {
   name: string;
@@ -127,7 +128,7 @@ type RegressionPattern = {
 type RegressionCase = {
   caseId: string;
   question?: string;
-  outcome: "regression" | "operational_regression";
+  outcome: "regression" | "operational_regression" | "pre_existing_failure";
   sourceStatus: string;
   targetStatus: string;
   sourceOutput?: string;
@@ -148,6 +149,11 @@ type EvaluationAnalysis = {
   fileName: string;
   format: string;
   sheetName?: string;
+  sourceModel?: string;
+  targetModel?: string;
+  sourceRunId?: string;
+  targetRunId?: string;
+  evaluationId?: string;
   promptSha256: string;
   evaluationSha256: string;
   caseCount: number;
@@ -459,6 +465,26 @@ async function sha256File(file: File): Promise<string> {
     .join("");
 }
 
+async function sha256Text(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function modelNamesMatch(actual: string | undefined, expected: string): boolean {
+  if (!actual || !expected) {
+    return true;
+  }
+  const normalizedActual = actual.toLowerCase();
+  const normalizedExpected = expected.toLowerCase();
+  return (
+    normalizedActual === normalizedExpected ||
+    normalizedActual.startsWith(`${normalizedExpected}-`) ||
+    normalizedExpected.startsWith(`${normalizedActual}-`)
+  );
+}
+
 const workflowSteps = ["Discover", "Assess", "Adapt", "Validate", "Roll out", "Retire"];
 
 type WorkflowStep = "discover" | "assess" | "adapt";
@@ -508,10 +534,17 @@ function App() {
   const [deploymentOptionsError, setDeploymentOptionsError] = useState("");
   const [deploymentOptionsLoading, setDeploymentOptionsLoading] = useState(false);
   const [promptArtifact, setPromptArtifact] = useState<EvidenceArtifact | null>(null);
+  const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("combined");
   const [baselineArtifact, setBaselineArtifact] = useState<EvidenceArtifact | null>(null);
+  const [datasetArtifact, setDatasetArtifact] = useState<EvidenceArtifact | null>(null);
+  const [sourceArtifact, setSourceArtifact] = useState<EvidenceArtifact | null>(null);
+  const [targetArtifact, setTargetArtifact] = useState<EvidenceArtifact | null>(null);
   const [evidenceError, setEvidenceError] = useState<Record<EvidenceKind, string>>({
     prompt: "",
     baseline: "",
+    dataset: "",
+    source: "",
+    target: "",
   });
   const [evaluationAnalysis, setEvaluationAnalysis] =
     useState<EvaluationAnalysis | null>(null);
@@ -533,6 +566,9 @@ function App() {
   const [deploymentMetricsLoading, setDeploymentMetricsLoading] = useState(false);
   const promptInputRef = useRef<HTMLInputElement>(null);
   const baselineInputRef = useRef<HTMLInputElement>(null);
+  const datasetInputRef = useRef<HTMLInputElement>(null);
+  const sourceInputRef = useRef<HTMLInputElement>(null);
+  const targetInputRef = useRef<HTMLInputElement>(null);
   const assessmentRequestId = useRef(0);
   const deploymentOptionsRequestId = useRef(0);
   const inventoryRequestId = useRef(0);
@@ -541,6 +577,9 @@ function App() {
   const evidenceReadRequestIds = useRef<Record<EvidenceKind, number>>({
     prompt: 0,
     baseline: 0,
+    dataset: 0,
+    source: 0,
+    target: 0,
   });
 
   const scanResource = async (resource: ModelAccount, requestId: number) => {
@@ -765,28 +804,45 @@ function App() {
   );
   const selectedDeploymentSKU =
     deploymentOptions?.skus.find((sku) => sku.name === selectedSKU) ?? null;
+  const bundleSummary: EvidenceSummary | undefined =
+    datasetArtifact?.summary && sourceArtifact?.summary && targetArtifact?.summary
+      ? {
+          caseCount: datasetArtifact.summary.caseCount,
+          caseIds: datasetArtifact.summary.caseIds,
+          sourceModel: sourceArtifact.summary.runModel,
+          targetModel: targetArtifact.summary.runModel,
+          sourceRunId: sourceArtifact.summary.runId,
+          targetRunId: targetArtifact.summary.runId,
+          format: "foundry-run",
+        }
+      : undefined;
+  const activeEvidenceSummary =
+    evidenceMode === "combined" ? baselineArtifact?.summary : bundleSummary;
   const baselineSourceMatches =
-    !baselineArtifact?.summary?.sourceModel ||
+    !activeEvidenceSummary?.sourceModel ||
     !adaptSourceDeployment ||
-    baselineArtifact.summary.sourceModel.toLowerCase() ===
-      adaptSourceDeployment.modelName.toLowerCase();
+    modelNamesMatch(activeEvidenceSummary.sourceModel, adaptSourceDeployment.modelName);
   const expectedTargetModel =
     adaptTargetDeployment?.modelName ?? recommendation?.suggestedModel ?? "";
   const baselineTargetMatches =
-    !baselineArtifact?.summary?.targetModel ||
+    !activeEvidenceSummary?.targetModel ||
     !expectedTargetModel ||
-    baselineArtifact.summary.targetModel.toLowerCase() === expectedTargetModel.toLowerCase();
+    modelNamesMatch(activeEvidenceSummary.targetModel, expectedTargetModel);
   const promptHashMatches =
-    !baselineArtifact?.summary?.promptSha256 ||
+    !activeEvidenceSummary?.promptSha256 ||
     !promptArtifact ||
-    baselineArtifact.summary.promptSha256 === promptArtifact.sha256;
+    activeEvidenceSummary.promptSha256 === promptArtifact.sha256;
   const telemetryWindowReady =
     telemetryWindow.start !== "" &&
     telemetryWindow.end !== "" &&
     Date.parse(telemetryWindow.start) < Date.parse(telemetryWindow.end);
   const evidenceReady =
     promptArtifact !== null &&
-    baselineArtifact !== null &&
+    (evidenceMode === "combined"
+      ? baselineArtifact !== null
+      : datasetArtifact !== null &&
+        sourceArtifact !== null &&
+        targetArtifact !== null) &&
     adaptSourceDeploymentId !== "" &&
     adaptTargetDeploymentId !== "" &&
     adaptTargetDeploymentId !== "planned-target" &&
@@ -809,9 +865,11 @@ function App() {
         : [],
     [promptOptimization],
   );
-  const promptFixableRegressionCount =
+  const promptFixableTargetFailureCount =
     evaluationAnalysis?.cases.filter(
-      (item) => item.outcome === "regression" && item.promptFixable === "candidate",
+      (item) =>
+        (item.outcome === "regression" || item.outcome === "pre_existing_failure") &&
+        item.promptFixable === "candidate",
     ).length ?? 0;
 
   const resetAdaptEvidence = () => {
@@ -819,9 +877,15 @@ function App() {
     promptOptimizationRequestId.current += 1;
     evidenceReadRequestIds.current.prompt += 1;
     evidenceReadRequestIds.current.baseline += 1;
+    evidenceReadRequestIds.current.dataset += 1;
+    evidenceReadRequestIds.current.source += 1;
+    evidenceReadRequestIds.current.target += 1;
     setPromptArtifact(null);
     setBaselineArtifact(null);
-    setEvidenceError({ prompt: "", baseline: "" });
+    setDatasetArtifact(null);
+    setSourceArtifact(null);
+    setTargetArtifact(null);
+    setEvidenceError({ prompt: "", baseline: "", dataset: "", source: "", target: "" });
     setEvaluationAnalysis(null);
     setEvaluationAnalysisError("");
     setEvaluationAnalysisLoading(false);
@@ -1051,10 +1115,22 @@ function App() {
     const requestId = ++evidenceReadRequestIds.current[kind];
     evaluationAnalysisRequestId.current += 1;
     promptOptimizationRequestId.current += 1;
-    if (kind === "prompt") {
-      setPromptArtifact(null);
-    } else {
-      setBaselineArtifact(null);
+    switch (kind) {
+      case "prompt":
+        setPromptArtifact(null);
+        break;
+      case "baseline":
+        setBaselineArtifact(null);
+        break;
+      case "dataset":
+        setDatasetArtifact(null);
+        break;
+      case "source":
+        setSourceArtifact(null);
+        break;
+      case "target":
+        setTargetArtifact(null);
+        break;
     }
     setEvidenceError((current) => ({ ...current, [kind]: "" }));
     setEvaluationAnalysis(null);
@@ -1076,6 +1152,20 @@ function App() {
         }
       } else if (extension !== "xlsx") {
         summary = parseEvidence(await file.text());
+        if (kind === "baseline" && summary.format !== "combined") {
+          throw new Error(
+            "This is a Foundry dataset or run export. Switch to Run bundle and upload all three artifacts.",
+          );
+        }
+        if (kind === "dataset" && summary.format !== "foundry-dataset") {
+          throw new Error("Choose the Foundry generated dataset JSONL file.");
+        }
+        if (
+          (kind === "source" || kind === "target") &&
+          summary.format !== "foundry-run"
+        ) {
+          throw new Error("Choose a Foundry eval.run.output_item results JSONL file.");
+        }
       }
       const artifact: EvidenceArtifact = {
         name: file.name,
@@ -1088,10 +1178,24 @@ function App() {
       if (requestId !== evidenceReadRequestIds.current[kind]) {
         return;
       }
-      if (kind === "prompt") {
-        setPromptArtifact(artifact);
-      } else {
-        setBaselineArtifact(artifact);
+      switch (kind) {
+        case "prompt":
+          setPromptArtifact(artifact);
+          break;
+        case "baseline":
+          setBaselineArtifact(artifact);
+          break;
+        case "dataset":
+          setDatasetArtifact(artifact);
+          break;
+        case "source":
+          setSourceArtifact(artifact);
+          break;
+        case "target":
+          setTargetArtifact(artifact);
+          break;
+      }
+      if (kind !== "prompt") {
         if (artifact.summary?.startedAt && artifact.summary.completedAt) {
           setTelemetryPreset("evaluation");
           setTelemetryWindow({
@@ -1104,10 +1208,22 @@ function App() {
       if (requestId !== evidenceReadRequestIds.current[kind]) {
         return;
       }
-      if (kind === "prompt") {
-        setPromptArtifact(null);
-      } else {
-        setBaselineArtifact(null);
+      switch (kind) {
+        case "prompt":
+          setPromptArtifact(null);
+          break;
+        case "baseline":
+          setBaselineArtifact(null);
+          break;
+        case "dataset":
+          setDatasetArtifact(null);
+          break;
+        case "source":
+          setSourceArtifact(null);
+          break;
+        case "target":
+          setTargetArtifact(null);
+          break;
       }
       setEvidenceError((current) => ({
         ...current,
@@ -1116,14 +1232,53 @@ function App() {
     }
   };
 
+  const changeEvidenceMode = (mode: EvidenceMode) => {
+    if (mode === evidenceMode) {
+      return;
+    }
+    evaluationAnalysisRequestId.current += 1;
+    promptOptimizationRequestId.current += 1;
+    setEvidenceMode(mode);
+    setEvaluationAnalysis(null);
+    setEvaluationAnalysisError("");
+    setPromptOptimization(null);
+    setPromptOptimizationError("");
+    setEvaluationAnalysisLoading(false);
+    setPromptOptimizationLoading(false);
+  };
+
+  const appendEvaluationEvidence = (form: FormData) => {
+    if (evidenceMode === "combined" && baselineArtifact) {
+      form.append("evaluation", baselineArtifact.file, baselineArtifact.name);
+      return;
+    }
+    if (datasetArtifact && sourceArtifact && targetArtifact) {
+      form.append("dataset", datasetArtifact.file, datasetArtifact.name);
+      form.append("sourceEvaluation", sourceArtifact.file, sourceArtifact.name);
+      form.append("targetEvaluation", targetArtifact.file, targetArtifact.name);
+    }
+  };
+
+  const currentEvaluationSHA256 = async () => {
+    if (evidenceMode === "combined") {
+      return baselineArtifact?.sha256 ?? "";
+    }
+    if (!datasetArtifact || !sourceArtifact || !targetArtifact) {
+      return "";
+    }
+    return sha256Text(
+      `${datasetArtifact.sha256}:${sourceArtifact.sha256}:${targetArtifact.sha256}`,
+    );
+  };
+
   const analyzeEvaluation = async () => {
-    if (!promptArtifact || !baselineArtifact || !evidenceReady) {
+    if (!promptArtifact || !evidenceReady) {
       return;
     }
     const requestId = ++evaluationAnalysisRequestId.current;
     promptOptimizationRequestId.current += 1;
     const expectedPromptSHA256 = promptArtifact.sha256;
-    const expectedEvaluationSHA256 = baselineArtifact.sha256;
+    const expectedEvaluationSHA256 = await currentEvaluationSHA256();
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 60_000);
     setEvaluationAnalysis(null);
@@ -1134,7 +1289,13 @@ function App() {
     try {
       const form = new FormData();
       form.append("prompt", promptArtifact.file, promptArtifact.name);
-      form.append("evaluation", baselineArtifact.file, baselineArtifact.name);
+      appendEvaluationEvidence(form);
+      if (adaptSourceDeployment) {
+        form.append("sourceModelName", adaptSourceDeployment.modelName);
+      }
+      if (adaptTargetDeployment) {
+        form.append("targetModelName", adaptTargetDeployment.modelName);
+      }
       const response = await fetch("/api/evaluation-analysis", {
         method: "POST",
         headers: {
@@ -1179,7 +1340,7 @@ function App() {
   const optimizePrompt = async () => {
     if (
       !promptArtifact ||
-      !baselineArtifact ||
+      !evidenceReady ||
       !evaluationAnalysis ||
       !adaptSourceDeployment ||
       !adaptTargetDeployment ||
@@ -1189,7 +1350,7 @@ function App() {
     }
     const requestId = ++promptOptimizationRequestId.current;
     const expectedPromptSHA256 = promptArtifact.sha256;
-    const expectedEvaluationSHA256 = baselineArtifact.sha256;
+    const expectedEvaluationSHA256 = await currentEvaluationSHA256();
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 130_000);
     setPromptOptimization(null);
@@ -1198,7 +1359,7 @@ function App() {
     try {
       const form = new FormData();
       form.append("prompt", promptArtifact.file, promptArtifact.name);
-      form.append("evaluation", baselineArtifact.file, baselineArtifact.name);
+      appendEvaluationEvidence(form);
       form.append("sourceModelName", adaptSourceDeployment.modelName);
       form.append("targetModelName", adaptTargetDeployment.modelName);
       form.append("optimizerAccountName", promptOptimizerDeployment.accountName);
@@ -1341,15 +1502,47 @@ function App() {
         artifact: promptArtifact,
         inputRef: promptInputRef,
       },
-      {
-        kind: "baseline",
-        title: "Evaluation results",
-        description:
-          "Dataset cases plus evaluated Source/Target outputs, scores, failure details, and traces.",
-        accept: ".xlsx,.json,.jsonl",
-        artifact: baselineArtifact,
-        inputRef: baselineInputRef,
-      },
+      ...(evidenceMode === "combined"
+        ? [
+            {
+              kind: "baseline" as const,
+              title: "Combined evaluation",
+              description:
+                "One paired XLSX/JSON/JSONL containing cases, Source/Target outputs, evaluator results, and metrics.",
+              accept: ".xlsx,.json,.jsonl",
+              artifact: baselineArtifact,
+              inputRef: baselineInputRef,
+            },
+          ]
+        : [
+            {
+              kind: "dataset" as const,
+              title: "Dataset",
+              description:
+                "Foundry generated JSONL with id, query, description, and candidate_response.",
+              accept: ".json,.jsonl",
+              artifact: datasetArtifact,
+              inputRef: datasetInputRef,
+            },
+            {
+              kind: "source" as const,
+              title: "Source results",
+              description:
+                "Foundry eval.run.output_item JSONL produced by the Source model.",
+              accept: ".json,.jsonl",
+              artifact: sourceArtifact,
+              inputRef: sourceInputRef,
+            },
+            {
+              kind: "target" as const,
+              title: "Target results",
+              description:
+                "Foundry eval.run.output_item JSONL produced by the Target model.",
+              accept: ".json,.jsonl",
+              artifact: targetArtifact,
+              inputRef: targetInputRef,
+            },
+          ]),
     ];
 
     return (
@@ -1611,13 +1804,36 @@ function App() {
                 <span className="section-kicker">EVALUATION RESULTS</span>
                 <h2>Load the unchanged comparison</h2>
                 <p>
-                  Load the Source prompt and the evaluation export containing the dataset,
-                  evaluated Source/Target outputs, scores, and failure evidence.
+                  Use one paired comparison export, or assemble a Foundry bundle from the
+                  dataset and the two independently downloaded model runs.
                 </p>
               </div>
               <Badge appearance="tint" color={evidenceReady ? "success" : "warning"}>
-                {evidenceReady ? "Ready to analyze" : "2 artifacts required"}
+                {evidenceReady
+                  ? "Ready to analyze"
+                  : evidenceMode === "combined"
+                    ? "2 artifacts required"
+                    : "4 artifacts required"}
               </Badge>
+            </div>
+
+            <div className="evidence-mode-switch" aria-label="Evaluation evidence format">
+              <button
+                type="button"
+                className={evidenceMode === "combined" ? "active" : ""}
+                onClick={() => changeEvidenceMode("combined")}
+              >
+                <strong>Combined export</strong>
+                <span>Meera or canonical paired evidence</span>
+              </button>
+              <button
+                type="button"
+                className={evidenceMode === "bundle" ? "active" : ""}
+                onClick={() => changeEvidenceMode("bundle")}
+              >
+                <strong>Run bundle</strong>
+                <span>Foundry dataset + Source + Target</span>
+              </button>
             </div>
 
             <div className="evidence-grid">
@@ -1681,8 +1897,8 @@ function App() {
               <div>
                 <strong>Analyze the customer-provided evaluation</strong>
                 <span>
-                  Regression counts and percentages are computed locally from evaluator
-                  statuses, scores, rationales, and failure evidence.
+                  Files are joined by case ID and checked for matching queries, references,
+                  run lineage, evaluator results, and Source/Target model identity.
                 </span>
               </div>
               <Button
@@ -1691,7 +1907,7 @@ function App() {
                 disabled={!evidenceReady || evaluationAnalysisLoading}
                 onClick={() => void analyzeEvaluation()}
               >
-                {evaluationAnalysisLoading ? "Analyzing…" : "Analyze regressions"}
+                {evaluationAnalysisLoading ? "Analyzing…" : "Analyze evidence"}
               </Button>
             </div>
             {evaluationAnalysisLoading && (
@@ -1705,12 +1921,16 @@ function App() {
               </MessageBar>
             )}
 
-            {baselineArtifact?.summary && (
+            {activeEvidenceSummary && (
               <div className="evaluation-result">
                 <div className="evaluation-result-heading">
                   <div>
                     <span className="section-kicker">RESULT SUMMARY</span>
-                    <h3>{baselineArtifact.name}</h3>
+                    <h3>
+                      {evidenceMode === "combined"
+                        ? baselineArtifact?.name
+                        : "Foundry evaluation bundle"}
+                    </h3>
                   </div>
                   <Badge
                     appearance="tint"
@@ -1727,20 +1947,20 @@ function App() {
                   <div>
                     <span>Source run</span>
                     <strong>
-                      {baselineArtifact.summary.sourceRunId || "Run ID not reported"}
+                      {activeEvidenceSummary.sourceRunId || "Run ID not reported"}
                     </strong>
                     <small>
-                      {baselineArtifact.summary.sourceModel || "Model not reported"} ·{" "}
+                      {activeEvidenceSummary.sourceModel || "Model not reported"} ·{" "}
                       {adaptSourceDeployment?.deploymentName || "No deployment selected"}
                     </small>
                   </div>
                   <div>
                     <span>Target run</span>
                     <strong>
-                      {baselineArtifact.summary.targetRunId || "Run ID not reported"}
+                      {activeEvidenceSummary.targetRunId || "Run ID not reported"}
                     </strong>
                     <small>
-                      {baselineArtifact.summary.targetModel || "Model not reported"} ·{" "}
+                      {activeEvidenceSummary.targetModel || "Model not reported"} ·{" "}
                       {adaptTargetDeployment?.deploymentName ||
                         (adaptTargetDeploymentId === "planned-target"
                           ? "Planned deployment"
@@ -1751,25 +1971,25 @@ function App() {
                 <div className="evaluation-metrics">
                   <div>
                     <span>Cases</span>
-                    <strong>{baselineArtifact.summary.caseCount}</strong>
+                    <strong>{activeEvidenceSummary.caseCount}</strong>
                   </div>
                   <div>
                     <span>Stable</span>
-                    <strong>{baselineArtifact.summary.stable ?? "—"}</strong>
+                    <strong>{activeEvidenceSummary.stable ?? "—"}</strong>
                   </div>
                   <div>
                     <span>Regressions</span>
-                    <strong>{baselineArtifact.summary.regressions ?? "—"}</strong>
+                    <strong>{activeEvidenceSummary.regressions ?? "—"}</strong>
                   </div>
                   <div>
                     <span>Improvements</span>
-                    <strong>{baselineArtifact.summary.improvements ?? "—"}</strong>
+                    <strong>{activeEvidenceSummary.improvements ?? "—"}</strong>
                   </div>
                 </div>
                 {!baselineSourceMatches && (
                   <MessageBar intent="error">
                     <MessageBarBody>
-                      Result Source model {baselineArtifact.summary.sourceModel} does not
+                      Result Source model {activeEvidenceSummary.sourceModel} does not
                       match {adaptSourceDeployment?.modelName}.
                     </MessageBarBody>
                   </MessageBar>
@@ -1777,7 +1997,7 @@ function App() {
                 {!baselineTargetMatches && (
                   <MessageBar intent="error">
                     <MessageBarBody>
-                      Result Target model {baselineArtifact.summary.targetModel} does not
+                      Result Target model {activeEvidenceSummary.targetModel} does not
                       match {expectedTargetModel}.
                     </MessageBarBody>
                   </MessageBar>
@@ -1876,7 +2096,7 @@ function App() {
                     <div className="analysis-panel-heading">
                       <div>
                         <span className="section-kicker">FAILURE PATTERNS</span>
-                        <strong>Recurring migration regressions</strong>
+                        <strong>Recurring Target failure patterns</strong>
                       </div>
                     </div>
                     <div className="pattern-list">
@@ -1916,7 +2136,7 @@ function App() {
                   <div className="analysis-panel-heading">
                     <div>
                       <span className="section-kicker">CASE EVIDENCE</span>
-                      <strong>Regressions reported by the customer evaluation</strong>
+                      <strong>Target failures reported by the customer evaluation</strong>
                     </div>
                     <span>{evaluationAnalysis.cases.length} cases</span>
                   </div>
@@ -1982,9 +2202,10 @@ function App() {
                       <h3>Generate an evidence-backed PromptV2 candidate</h3>
                       <p>
                         PromptV2 receives the Source prompt plus server-derived pattern
-                        counts and migration directives from {promptFixableRegressionCount}{" "}
-                        prompt-fixable regression
-                        {promptFixableRegressionCount === 1 ? "" : "s"}. Customer free text,
+                        counts and directives from {promptFixableTargetFailureCount}{" "}
+                        prompt-fixable Target failure
+                        {promptFixableTargetFailureCount === 1 ? "" : "s"}, including
+                        migration regressions and residual failures. Customer free text,
                         operational failures, and retrieval failures stay outside the
                         instruction channel. The rewrite runs on{" "}
                         {promptOptimizerDeployment
@@ -1998,7 +2219,7 @@ function App() {
                           icon={<span aria-hidden="true">✦</span>}
                           disabled={
                             promptOptimizationLoading ||
-                            promptFixableRegressionCount === 0 ||
+                            promptFixableTargetFailureCount === 0 ||
                             promptOptimizerDeployment === null
                           }
                           onClick={() => void optimizePrompt()}
@@ -2011,13 +2232,13 @@ function App() {
 
                   {promptOptimizationLoading && (
                     <div className="analysis-loading">
-                      <Spinner label="Sending regression evidence to PromptV2…" />
+                      <Spinner label="Sending Target failure evidence to PromptV2…" />
                     </div>
                   )}
-                  {promptFixableRegressionCount === 0 && (
+                  {promptFixableTargetFailureCount === 0 && (
                     <MessageBar intent="warning">
                       <MessageBarBody>
-                        No prompt-fixable quality regressions were found. PromptV2 will not
+                        No prompt-fixable Target failures were found. PromptV2 will not
                         rewrite the prompt for operational or retrieval failures.
                       </MessageBarBody>
                     </MessageBar>
@@ -2065,7 +2286,7 @@ function App() {
                         </div>
                         <div>
                           <span>Optimization mode</span>
-                          <strong>Regression-steered</strong>
+                          <strong>Target-failure-steered</strong>
                           <small>
                             {promptOptimization.targetSpecific
                               ? "Target-specific"

@@ -873,6 +873,51 @@ h1 {
   line-height: 1.55;
 }
 
+.evidence-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  width: min(680px, 100%);
+  margin-top: 20px;
+  padding: 5px;
+  border: 1px solid #d8e1ec;
+  border-radius: 13px;
+  background: #edf2f7;
+}
+
+.evidence-mode-switch button {
+  display: grid;
+  gap: 3px;
+  padding: 11px 14px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: #526177;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.evidence-mode-switch button.active {
+  border-color: #9cc6e9;
+  color: #153d63;
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(31, 78, 121, 0.08);
+}
+
+.evidence-mode-switch button:focus-visible {
+  outline: 2px solid #0f6cbd;
+  outline-offset: 2px;
+}
+
+.evidence-mode-switch strong {
+  font-size: 13px;
+}
+
+.evidence-mode-switch span {
+  font-size: 11px;
+  opacity: 0.78;
+}
+
 .evidence-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2072,7 +2117,8 @@ footer {
 
   .create-fields,
   .deployment-signal-grid,
-  .evidence-grid {
+  .evidence-grid,
+  .evidence-mode-switch {
     grid-template-columns: 1fr;
   }
 

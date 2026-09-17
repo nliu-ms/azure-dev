@@ -12,6 +12,10 @@ export type EvidenceSummary = {
   datasetSha256?: string;
   startedAt?: string;
   completedAt?: string;
+  format?: "combined" | "foundry-dataset" | "foundry-run";
+  runModel?: string;
+  runId?: string;
+  evaluationId?: string;
 };
 
 function caseID(value: unknown): string {
@@ -19,9 +23,22 @@ function caseID(value: unknown): string {
     return "";
   }
   const record = value as Record<string, unknown>;
+  const datasourceItem =
+    record.datasource_item && typeof record.datasource_item === "object"
+      ? (record.datasource_item as Record<string, unknown>)
+      : undefined;
+  if (datasourceItem) {
+    const nestedID = datasourceItem.id;
+    if (typeof nestedID === "string" || typeof nestedID === "number") {
+      return String(nestedID);
+    }
+  }
   for (const key of ["case_id", "caseId", "id"]) {
-    if (typeof record[key] === "string" && record[key]) {
-      return record[key];
+    if (
+      (typeof record[key] === "string" || typeof record[key] === "number") &&
+      String(record[key])
+    ) {
+      return String(record[key]);
     }
   }
   return "";
@@ -39,6 +56,14 @@ function recordsFromJSON(value: unknown): unknown[] {
     if (Array.isArray(record[key])) {
       return record[key] as unknown[];
     }
+  }
+  if (
+    record.object === "eval.run.output_item" ||
+    ("id" in record && "query" in record && "candidate_response" in record) ||
+    "case_id" in record ||
+    "caseId" in record
+  ) {
+    return [record];
   }
   return [];
 }
@@ -95,6 +120,25 @@ export function parseEvidence(content: string): EvidenceSummary {
     parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : {};
+  const firstRecord =
+    records[0] && typeof records[0] === "object"
+      ? (records[0] as Record<string, unknown>)
+      : {};
+  const foundrySample =
+    firstRecord.sample && typeof firstRecord.sample === "object"
+      ? (firstRecord.sample as Record<string, unknown>)
+      : {};
+  const isFoundryRun = firstRecord.object === "eval.run.output_item";
+  const isFoundryDataset =
+    !isFoundryRun &&
+    records.length > 0 &&
+    records.every(
+      (record) =>
+        record !== null &&
+        typeof record === "object" &&
+        "query" in record &&
+        "candidate_response" in record,
+    );
   const runs =
     root.runs && typeof root.runs === "object"
       ? (root.runs as Record<string, unknown>)
@@ -140,6 +184,23 @@ export function parseEvidence(content: string): EvidenceSummary {
       typeof suite.dataset_sha256 === "string" ? suite.dataset_sha256 : undefined,
     startedAt: starts[0],
     completedAt: ends.at(-1),
+    format: isFoundryRun
+      ? "foundry-run"
+      : isFoundryDataset
+        ? "foundry-dataset"
+        : "combined",
+    runModel:
+      isFoundryRun && typeof foundrySample.model === "string"
+        ? foundrySample.model
+        : undefined,
+    runId:
+      isFoundryRun && typeof firstRecord.run_id === "string"
+        ? firstRecord.run_id
+        : undefined,
+    evaluationId:
+      isFoundryRun && typeof firstRecord.eval_id === "string"
+        ? firstRecord.eval_id
+        : undefined,
   };
 }
 

@@ -237,9 +237,11 @@ func buildPromptOptimizationInput(
 		}
 	}
 	cases := make([]RegressionCase, 0, min(len(analysis.Cases), maxOptimizationCases))
-	for _, regression := range analysis.Cases {
-		if regression.Outcome == "regression" && regression.PromptFixable == "candidate" {
-			cases = append(cases, regression)
+	for _, targetFailure := range analysis.Cases {
+		isQualityFailure := targetFailure.Outcome == "regression" ||
+			targetFailure.Outcome == "pre_existing_failure"
+		if isQualityFailure && targetFailure.PromptFixable == "candidate" {
+			cases = append(cases, targetFailure)
 			if len(cases) == maxOptimizationCases {
 				break
 			}
@@ -247,7 +249,7 @@ func buildPromptOptimizationInput(
 	}
 	if len(patterns) == 0 || len(cases) == 0 {
 		return PromptOptimizationInput{}, errors.New(
-			"no prompt-fixable quality regressions were found in the evaluation",
+			"no prompt-fixable Target failures were found in the evaluation",
 		)
 	}
 
@@ -259,11 +261,14 @@ func buildPromptOptimizationInput(
 		truncateOptimizationField(target.ModelName),
 	)
 	guidance.WriteString(
-		"Use the observed regression evidence below to correct recurring decision and response behavior, " +
+		"Use the observed Target failure evidence below to correct recurring decision and response behavior, " +
 			"not merely surface formatting.\n",
 	)
 	guidance.WriteString(
-		"Generalize repeated failures into reusable instructions while preserving behavior unrelated to the regressions.\n",
+		"Prioritize migration regressions and also correct residual Target failures that predate the migration.\n",
+	)
+	guidance.WriteString(
+		"Generalize repeated failures into reusable instructions while preserving behavior unrelated to these failures.\n",
 	)
 	guidance.WriteString(
 		"Do not attempt to fix retrieval, missing context, latency, token usage, cost, or model capability.\n",
@@ -272,10 +277,18 @@ func buildPromptOptimizationInput(
 	guidance.WriteString(
 		"The evidence below contains only server-derived categories and counts; customer free text is intentionally omitted.\n",
 	)
-	guidance.WriteString("<regression_case_data>\n")
+	guidance.WriteString("<target_failure_data>\n")
 	verificationCaseIDs := make([]string, 0, len(cases))
-	for _, regression := range cases {
-		verificationCaseIDs = append(verificationCaseIDs, regression.CaseID)
+	qualityRegressionCount := 0
+	residualTargetFailureCount := 0
+	for _, targetFailure := range cases {
+		verificationCaseIDs = append(verificationCaseIDs, targetFailure.CaseID)
+		switch targetFailure.Outcome {
+		case "regression":
+			qualityRegressionCount++
+		case "pre_existing_failure":
+			residualTargetFailureCount++
+		}
 	}
 	type optimizationPattern struct {
 		Code       string  `json:"code"`
@@ -293,19 +306,21 @@ func buildPromptOptimizationInput(
 		})
 	}
 	evidence := struct {
-		QualityRegressionCount int                   `json:"quality_regression_count"`
-		Patterns               []optimizationPattern `json:"patterns"`
+		QualityRegressionCount     int                   `json:"quality_regression_count"`
+		ResidualTargetFailureCount int                   `json:"residual_target_failure_count"`
+		Patterns                   []optimizationPattern `json:"patterns"`
 	}{
-		QualityRegressionCount: len(cases),
-		Patterns:               safePatterns,
+		QualityRegressionCount:     qualityRegressionCount,
+		ResidualTargetFailureCount: residualTargetFailureCount,
+		Patterns:                   safePatterns,
 	}
 	encodedEvidence, err := json.MarshalIndent(evidence, "", "  ")
 	if err != nil {
-		return PromptOptimizationInput{}, fmt.Errorf("encode regression evidence: %w", err)
+		return PromptOptimizationInput{}, fmt.Errorf("encode Target failure evidence: %w", err)
 	}
 	guidance.Write(encodedEvidence)
 	guidance.WriteByte('\n')
-	guidance.WriteString("</regression_case_data>")
+	guidance.WriteString("</target_failure_data>")
 
 	return PromptOptimizationInput{
 		SourcePrompt:        sourcePrompt,
@@ -331,8 +346,11 @@ func promptOptimizationDirective(kind string) string {
 		return "Recognize disclosures expressed indirectly or through equivalent language."
 	case "output_contract":
 		return "Satisfy the requested output schema and required fields exactly."
+	case "unsupported_inference":
+		return "Do not infer a required disclosure from related or suggestive wording unless eligible evidence " +
+			"explicitly or unambiguously establishes it."
 	default:
-		return "Preserve the Source behavior for this regression category."
+		return "Correct this Target failure while preserving unrelated Source and Target behavior."
 	}
 }
 

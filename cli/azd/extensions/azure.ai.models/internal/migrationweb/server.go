@@ -366,7 +366,7 @@ func (s *Server) handleEvaluationAnalysis(w http.ResponseWriter, r *http.Request
 	r.Body = http.MaxBytesReader(w, r.Body, maxEvaluationUploadBytes)
 	if err := r.ParseMultipartForm(4 * 1024 * 1024); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "Prompt and evaluation files must be provided as multipart form data under the 24 MB limit.",
+			"error": "Prompt and evaluation evidence must be provided as multipart form data under the 24 MB total limit.",
 		})
 		return
 	}
@@ -382,22 +382,22 @@ func (s *Server) handleEvaluationAnalysis(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "The Source prompt file is empty."})
 		return
 	}
-	evaluationName, evaluation, err := readUploadedFile(r, "evaluation")
+	result, evaluationSHA256, err := analyzeUploadedEvaluation(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	result, err := analyzeEvaluation(evaluationName, evaluation)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("Could not analyze %q: %v", evaluationName, err),
-		})
+	if err := validateEvaluationModels(
+		result,
+		r.FormValue("sourceModelName"),
+		r.FormValue("targetModelName"),
+	); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	promptDigest := sha256.Sum256(prompt)
-	evaluationDigest := sha256.Sum256(evaluation)
 	result.PromptSHA256 = fmt.Sprintf("%x", promptDigest)
-	result.EvaluationSHA256 = fmt.Sprintf("%x", evaluationDigest)
+	result.EvaluationSHA256 = evaluationSHA256
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -411,7 +411,7 @@ func (s *Server) handlePromptOptimization(w http.ResponseWriter, r *http.Request
 	r.Body = http.MaxBytesReader(w, r.Body, maxEvaluationUploadBytes)
 	if err := r.ParseMultipartForm(4 * 1024 * 1024); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "Prompt and evaluation files must be provided as multipart form data under the 24 MB limit.",
+			"error": "Prompt and evaluation evidence must be provided as multipart form data under the 24 MB total limit.",
 		})
 		return
 	}
@@ -429,16 +429,17 @@ func (s *Server) handlePromptOptimization(w http.ResponseWriter, r *http.Request
 		})
 		return
 	}
-	evaluationName, evaluation, err := readUploadedFile(r, "evaluation")
+	analysis, evaluationSHA256, err := analyzeUploadedEvaluation(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	analysis, err := analyzeEvaluation(evaluationName, evaluation)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("Could not analyze %q: %v", evaluationName, err),
-		})
+	if err := validateEvaluationModels(
+		analysis,
+		r.FormValue("sourceModelName"),
+		r.FormValue("targetModelName"),
+	); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	target := ModelDeployment{
@@ -485,9 +486,8 @@ func (s *Server) handlePromptOptimization(w http.ResponseWriter, r *http.Request
 		return
 	}
 	promptDigest := sha256.Sum256(prompt)
-	evaluationDigest := sha256.Sum256(evaluation)
 	result.PromptSHA256 = fmt.Sprintf("%x", promptDigest)
-	result.EvaluationSHA256 = fmt.Sprintf("%x", evaluationDigest)
+	result.EvaluationSHA256 = evaluationSHA256
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -505,6 +505,95 @@ func readUploadedFile(r *http.Request, field string) (string, []byte, error) {
 		return "", nil, fmt.Errorf("%s file exceeds the 24 MB limit", field)
 	}
 	return filepath.Base(header.Filename), content, nil
+}
+
+func analyzeUploadedEvaluation(r *http.Request) (EvaluationAnalysis, string, error) {
+	if r.MultipartForm != nil && len(r.MultipartForm.File["evaluation"]) > 0 {
+		evaluationName, evaluation, err := readUploadedFile(r, "evaluation")
+		if err != nil {
+			return EvaluationAnalysis{}, "", err
+		}
+		result, err := analyzeEvaluation(evaluationName, evaluation)
+		if err != nil {
+			return EvaluationAnalysis{}, "", fmt.Errorf(
+				"Could not analyze %q: %w",
+				evaluationName,
+				err,
+			)
+		}
+		evaluationDigest := sha256.Sum256(evaluation)
+		return result, fmt.Sprintf("%x", evaluationDigest), nil
+	}
+
+	datasetName, dataset, err := readUploadedFile(r, "dataset")
+	if err != nil {
+		return EvaluationAnalysis{}, "", errors.New(
+			"Provide either one evaluation file or the complete dataset, sourceEvaluation, and targetEvaluation bundle.",
+		)
+	}
+	sourceName, source, err := readUploadedFile(r, "sourceEvaluation")
+	if err != nil {
+		return EvaluationAnalysis{}, "", err
+	}
+	targetName, target, err := readUploadedFile(r, "targetEvaluation")
+	if err != nil {
+		return EvaluationAnalysis{}, "", err
+	}
+	result, err := analyzeFoundryEvaluationBundle(
+		datasetName,
+		dataset,
+		sourceName,
+		source,
+		targetName,
+		target,
+	)
+	if err != nil {
+		return EvaluationAnalysis{}, "", fmt.Errorf("Could not analyze the Foundry bundle: %w", err)
+	}
+	datasetDigest := sha256.Sum256(dataset)
+	sourceDigest := sha256.Sum256(source)
+	targetDigest := sha256.Sum256(target)
+	joinedDigests := fmt.Sprintf(
+		"%x:%x:%x",
+		datasetDigest,
+		sourceDigest,
+		targetDigest,
+	)
+	bundleDigest := sha256.Sum256([]byte(joinedDigests))
+	return result, fmt.Sprintf("%x", bundleDigest), nil
+}
+
+func validateEvaluationModels(
+	analysis EvaluationAnalysis,
+	expectedSource string,
+	expectedTarget string,
+) error {
+	if !modelNamesCompatible(analysis.SourceModel, expectedSource) {
+		return fmt.Errorf(
+			"Source results model %q does not match the selected Source model %q",
+			analysis.SourceModel,
+			strings.TrimSpace(expectedSource),
+		)
+	}
+	if !modelNamesCompatible(analysis.TargetModel, expectedTarget) {
+		return fmt.Errorf(
+			"Target results model %q does not match the selected Target model %q",
+			analysis.TargetModel,
+			strings.TrimSpace(expectedTarget),
+		)
+	}
+	return nil
+}
+
+func modelNamesCompatible(actual string, expected string) bool {
+	actual = strings.ToLower(strings.TrimSpace(actual))
+	expected = strings.ToLower(strings.TrimSpace(expected))
+	if actual == "" || expected == "" {
+		return true
+	}
+	return actual == expected ||
+		strings.HasPrefix(actual, expected+"-") ||
+		strings.HasPrefix(expected, actual+"-")
 }
 
 func normalizeMetricsDeployment(deployment MetricsDeployment) MetricsDeployment {

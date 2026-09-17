@@ -26,6 +26,11 @@ type EvaluationAnalysis struct {
 	FileName            string              `json:"fileName"`
 	Format              string              `json:"format"`
 	SheetName           string              `json:"sheetName,omitempty"`
+	SourceModel         string              `json:"sourceModel,omitempty"`
+	TargetModel         string              `json:"targetModel,omitempty"`
+	SourceRunID         string              `json:"sourceRunId,omitempty"`
+	TargetRunID         string              `json:"targetRunId,omitempty"`
+	EvaluationID        string              `json:"evaluationId,omitempty"`
 	PromptSHA256        string              `json:"promptSha256"`
 	EvaluationSHA256    string              `json:"evaluationSha256"`
 	CaseCount           int                 `json:"caseCount"`
@@ -62,7 +67,7 @@ type RegressionPattern struct {
 	PromptFixable string   `json:"promptFixable"`
 }
 
-// RegressionCase describes one quality or operational regression.
+// RegressionCase describes one Target quality failure or operational regression.
 type RegressionCase struct {
 	CaseID              string   `json:"caseId"`
 	Question            string   `json:"question,omitempty"`
@@ -108,6 +113,25 @@ type evaluationAssessment struct {
 	status    string
 	score     *float64
 	rationale string
+}
+
+type foundryDatasetItem struct {
+	caseID            string
+	query             string
+	description       string
+	candidateResponse string
+}
+
+type foundryRunItem struct {
+	dataset      foundryDatasetItem
+	output       string
+	model        string
+	runID        string
+	evaluationID string
+	latency      *float64
+	inputTokens  *float64
+	outputTokens *float64
+	assessments  []evaluationAssessment
 }
 
 type worksheetData struct {
@@ -202,6 +226,402 @@ func analyzeEvaluation(fileName string, content []byte) (EvaluationAnalysis, err
 	}
 
 	return buildEvaluationAnalysis(fileName, strings.TrimPrefix(extension, "."), sheetName, fields, cases)
+}
+
+func analyzeFoundryEvaluationBundle(
+	datasetName string,
+	datasetContent []byte,
+	sourceName string,
+	sourceContent []byte,
+	targetName string,
+	targetContent []byte,
+) (EvaluationAnalysis, error) {
+	dataset, err := parseFoundryDataset(datasetContent)
+	if err != nil {
+		return EvaluationAnalysis{}, fmt.Errorf("parse %q: %w", datasetName, err)
+	}
+	source, sourceModel, sourceRunID, sourceEvaluationID, err := parseFoundryRun(sourceContent, "source")
+	if err != nil {
+		return EvaluationAnalysis{}, fmt.Errorf("parse %q: %w", sourceName, err)
+	}
+	target, targetModel, targetRunID, targetEvaluationID, err := parseFoundryRun(targetContent, "target")
+	if err != nil {
+		return EvaluationAnalysis{}, fmt.Errorf("parse %q: %w", targetName, err)
+	}
+	if sourceEvaluationID != "" &&
+		targetEvaluationID != "" &&
+		sourceEvaluationID != targetEvaluationID {
+		return EvaluationAnalysis{}, fmt.Errorf(
+			"Source eval_id %q does not match Target eval_id %q",
+			sourceEvaluationID,
+			targetEvaluationID,
+		)
+	}
+	if sourceRunID != "" && sourceRunID == targetRunID {
+		return EvaluationAnalysis{}, fmt.Errorf(
+			"Source and Target results report the same run_id %q",
+			sourceRunID,
+		)
+	}
+	if len(dataset) != len(source) || len(dataset) != len(target) {
+		return EvaluationAnalysis{}, fmt.Errorf(
+			"bundle case counts do not match: dataset=%d, Source=%d, Target=%d",
+			len(dataset),
+			len(source),
+			len(target),
+		)
+	}
+
+	cases := make([]evaluationCase, 0, len(dataset))
+	for _, caseID := range sortedFoundryCaseIDs(dataset) {
+		datasetItem := dataset[caseID]
+		sourceItem, ok := source[caseID]
+		if !ok {
+			return EvaluationAnalysis{}, fmt.Errorf("Source results are missing case %q", caseID)
+		}
+		targetItem, ok := target[caseID]
+		if !ok {
+			return EvaluationAnalysis{}, fmt.Errorf("Target results are missing case %q", caseID)
+		}
+		if err := validateFoundryDatasetItem(datasetItem, sourceItem.dataset, "Source"); err != nil {
+			return EvaluationAnalysis{}, err
+		}
+		if err := validateFoundryDatasetItem(datasetItem, targetItem.dataset, "Target"); err != nil {
+			return EvaluationAnalysis{}, err
+		}
+
+		item := evaluationCase{
+			caseID:             caseID,
+			question:           datasetItem.query,
+			sourceOutput:       sourceItem.output,
+			targetOutput:       targetItem.output,
+			sourceLatency:      sourceItem.latency,
+			targetLatency:      targetItem.latency,
+			sourceInputTokens:  sourceItem.inputTokens,
+			sourceOutputTokens: sourceItem.outputTokens,
+			targetInputTokens:  targetItem.inputTokens,
+			targetOutputTokens: targetItem.outputTokens,
+			assessments:        append(slices.Clone(sourceItem.assessments), targetItem.assessments...),
+		}
+		_, targetStatus, rationale := qualityAssessment(item)
+		if targetStatus == "fail" {
+			item.failureKind = inferFailureKind(rationale)
+			item.failureDetail = rationale
+			item.failureSource = "inferred"
+		}
+		cases = append(cases, item)
+	}
+
+	result, err := buildEvaluationAnalysis(
+		"Foundry evaluation bundle",
+		"foundry-bundle",
+		"",
+		[]string{
+			"datasource_item.id",
+			"datasource_item.query",
+			"datasource_item.sample.output_text",
+			"results[].passed",
+			"results[].score",
+			"sample.latency_ms",
+			"sample.usage",
+			"sample.model",
+			"run_id",
+			"eval_id",
+		},
+		cases,
+	)
+	if err != nil {
+		return EvaluationAnalysis{}, err
+	}
+	result.SourceModel = sourceModel
+	result.TargetModel = targetModel
+	result.SourceRunID = sourceRunID
+	result.TargetRunID = targetRunID
+	if sourceEvaluationID != "" {
+		result.EvaluationID = sourceEvaluationID
+	} else {
+		result.EvaluationID = targetEvaluationID
+	}
+	return result, nil
+}
+
+func parseFoundryDataset(content []byte) (map[string]foundryDatasetItem, error) {
+	records, err := foundryRecords(content)
+	if err != nil {
+		return nil, err
+	}
+	items := make(map[string]foundryDatasetItem, len(records))
+	for index, record := range records {
+		item, err := foundryDatasetItemFromRecord(record)
+		if err != nil {
+			return nil, fmt.Errorf("case %d: %w", index+1, err)
+		}
+		if _, exists := items[item.caseID]; exists {
+			return nil, fmt.Errorf("duplicate case ID %q", item.caseID)
+		}
+		items[item.caseID] = item
+	}
+	return items, nil
+}
+
+func sortedFoundryCaseIDs(items map[string]foundryDatasetItem) []string {
+	caseIDs := make([]string, 0, len(items))
+	for caseID := range items {
+		caseIDs = append(caseIDs, caseID)
+	}
+	slices.Sort(caseIDs)
+	return caseIDs
+}
+
+func parseFoundryRun(
+	content []byte,
+	subject string,
+) (map[string]foundryRunItem, string, string, string, error) {
+	records, err := foundryRecords(content)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+	items := make(map[string]foundryRunItem, len(records))
+	var model string
+	var runID string
+	var evaluationID string
+	for index, record := range records {
+		if stringAt(record, "object") != "eval.run.output_item" {
+			return nil, "", "", "", fmt.Errorf(
+				"record %d is not a Foundry eval.run.output_item",
+				index+1,
+			)
+		}
+		datasource, ok := valueAt(record, "datasource_item").(map[string]any)
+		if !ok {
+			return nil, "", "", "", fmt.Errorf("record %d has no datasource_item", index+1)
+		}
+		datasetItem, err := foundryDatasetItemFromRecord(datasource)
+		if err != nil {
+			return nil, "", "", "", fmt.Errorf("record %d: %w", index+1, err)
+		}
+		item := foundryRunItem{
+			dataset:      datasetItem,
+			output:       stringAt(datasource, "sample.output_text"),
+			model:        stringAt(record, "sample", "model"),
+			runID:        stringAt(record, "run_id"),
+			evaluationID: stringAt(record, "eval_id"),
+			latency:      floatAt(record, "sample", "latency_ms"),
+			inputTokens:  floatAt(record, "sample", "usage", "prompt_tokens"),
+			outputTokens: floatAt(record, "sample", "usage", "completion_tokens"),
+		}
+		results, ok := valueAt(record, "results").([]any)
+		if !ok || len(results) == 0 {
+			return nil, "", "", "", fmt.Errorf("record %d has no evaluator results", index+1)
+		}
+		for _, value := range results {
+			result, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			status := foundryPassedStatus(result["passed"])
+			if status == "" {
+				continue
+			}
+			item.assessments = append(item.assessments, evaluationAssessment{
+				evaluator: stringAt(result, "name"),
+				subject:   subject,
+				status:    status,
+				score:     floatAt(result, "score"),
+				rationale: foundryEvaluatorRationale(result),
+			})
+		}
+		if len(item.assessments) == 0 {
+			return nil, "", "", "", fmt.Errorf(
+				"record %d has no completed evaluator results",
+				index+1,
+			)
+		}
+		if _, exists := items[datasetItem.caseID]; exists {
+			return nil, "", "", "", fmt.Errorf("duplicate case ID %q", datasetItem.caseID)
+		}
+		if err := preserveFoundryRunMetadata(&model, item.model, "model"); err != nil {
+			return nil, "", "", "", err
+		}
+		if err := preserveFoundryRunMetadata(&runID, item.runID, "run_id"); err != nil {
+			return nil, "", "", "", err
+		}
+		if err := preserveFoundryRunMetadata(
+			&evaluationID,
+			item.evaluationID,
+			"eval_id",
+		); err != nil {
+			return nil, "", "", "", err
+		}
+		items[datasetItem.caseID] = item
+	}
+	if model == "" {
+		return nil, "", "", "", errors.New("Foundry run does not report sample.model")
+	}
+	if runID == "" {
+		return nil, "", "", "", errors.New("Foundry run does not report run_id")
+	}
+	return items, model, runID, evaluationID, nil
+}
+
+func foundryRecords(content []byte) ([]map[string]any, error) {
+	var document any
+	if err := json.Unmarshal(content, &document); err == nil {
+		switch value := document.(type) {
+		case []any:
+			records := make([]map[string]any, 0, len(value))
+			for _, item := range value {
+				if record, ok := item.(map[string]any); ok {
+					records = append(records, record)
+				}
+			}
+			if len(records) > 0 {
+				return records, nil
+			}
+		case map[string]any:
+			return []map[string]any{value}, nil
+		}
+	}
+
+	records := make([]map[string]any, 0)
+	for index, line := range bytes.Split(content, []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil {
+			return nil, fmt.Errorf("line %d is not valid JSON: %w", index+1, err)
+		}
+		records = append(records, record)
+	}
+	if len(records) == 0 {
+		return nil, errors.New("no records were found")
+	}
+	return records, nil
+}
+
+func foundryDatasetItemFromRecord(record map[string]any) (foundryDatasetItem, error) {
+	caseID := strings.TrimSpace(valueString(record["id"]))
+	if caseID == "" {
+		return foundryDatasetItem{}, errors.New("id is required")
+	}
+	return foundryDatasetItem{
+		caseID:            caseID,
+		query:             stringAt(record, "query"),
+		description:       stringAt(record, "description"),
+		candidateResponse: stringAt(record, "candidate_response"),
+	}, nil
+}
+
+func validateFoundryDatasetItem(
+	expected foundryDatasetItem,
+	actual foundryDatasetItem,
+	subject string,
+) error {
+	if expected.caseID != actual.caseID {
+		return fmt.Errorf("%s results case ID %q does not match dataset case %q", subject, actual.caseID, expected.caseID)
+	}
+	for _, field := range []struct {
+		name     string
+		expected string
+		actual   string
+	}{
+		{name: "query", expected: expected.query, actual: actual.query},
+		{name: "description", expected: expected.description, actual: actual.description},
+		{name: "candidate_response", expected: expected.candidateResponse, actual: actual.candidateResponse},
+	} {
+		if field.expected != field.actual {
+			return fmt.Errorf("%s results case %q has a mismatched %s", subject, expected.caseID, field.name)
+		}
+	}
+	return nil
+}
+
+func preserveFoundryRunMetadata(current *string, value string, field string) error {
+	value = strings.TrimSpace(value)
+	if *current == "" {
+		*current = value
+		return nil
+	}
+	if value != "" && value != *current {
+		return fmt.Errorf("Foundry run contains multiple %s values: %q and %q", field, *current, value)
+	}
+	return nil
+}
+
+func foundryPassedStatus(value any) string {
+	passed, ok := value.(bool)
+	if !ok {
+		return ""
+	}
+	if passed {
+		return "pass"
+	}
+	return "fail"
+}
+
+func foundryEvaluatorRationale(result map[string]any) string {
+	if reason := strings.TrimSpace(stringAt(result, "reason")); reason != "" {
+		return reason
+	}
+	output, ok := valueAt(result, "sample", "output").([]any)
+	if !ok || len(output) == 0 {
+		return ""
+	}
+	message, ok := output[0].(map[string]any)
+	if !ok {
+		return ""
+	}
+	content := strings.TrimSpace(stringAt(message, "content"))
+	if content == "" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return content
+	}
+	if reason := strings.TrimSpace(stringAt(payload, "reason")); reason != "" {
+		return reason
+	}
+	var parts []string
+	if steps, ok := payload["steps"].([]any); ok {
+		for _, value := range steps {
+			step, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if description := strings.TrimSpace(stringAt(step, "description")); description != "" {
+				parts = append(parts, description)
+			}
+			if conclusion := strings.TrimSpace(stringAt(step, "conclusion")); conclusion != "" {
+				parts = append(parts, conclusion)
+			}
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func inferFailureKind(rationale string) string {
+	normalized := strings.ToLower(rationale)
+	switch {
+	case strings.Contains(normalized, "unsupported inference"),
+		strings.Contains(normalized, "only implies"),
+		strings.Contains(normalized, "suggestive wording"):
+		return "unsupported_inference"
+	case strings.Contains(normalized, "output-format"),
+		strings.Contains(normalized, "output format"),
+		strings.Contains(normalized, "markdown heading"),
+		strings.Contains(normalized, "plain-text"),
+		strings.Contains(normalized, "json"):
+		return "output_contract"
+	case strings.Contains(normalized, "citation"):
+		return "presentation_format"
+	case strings.Contains(normalized, "equivalent wording"),
+		strings.Contains(normalized, "exact-match"):
+		return "semantic_equivalence"
+	default:
+		return "unlocalized_target_failure"
+	}
 }
 
 func readXLSX(content []byte) (worksheetData, error) {
@@ -757,8 +1177,13 @@ func buildEvaluationAnalysis(
 		default:
 			result.Stable++
 		}
-		if outcome != "regression" && outcome != "operational_regression" {
+		if outcome != "regression" &&
+			outcome != "operational_regression" &&
+			outcome != "pre_existing_failure" {
 			continue
+		}
+		if failureKind == "" && outcome == "pre_existing_failure" {
+			failureKind = "unlocalized_target_failure"
 		}
 
 		promptFixable := promptFixability(failureKind)
@@ -818,6 +1243,17 @@ func qualityAssessment(item evaluationCase) (string, string, string) {
 	evaluators := make(map[string]struct{})
 	for _, assessment := range item.assessments {
 		evaluators[assessment.evaluator] = struct{}{}
+	}
+	for _, evaluator := range sortedSetKeys(evaluators) {
+		normalized := strings.ToLower(evaluator)
+		if !strings.Contains(normalized, "quality") &&
+			!strings.Contains(normalized, "accuracy") {
+			continue
+		}
+		source, target, rationale := pairedAssessment(item.assessments, evaluator)
+		if source != "" && target != "" {
+			return source, target, rationale
+		}
 	}
 	for _, evaluator := range sortedSetKeys(evaluators) {
 		source, target, rationale := pairedAssessment(item.assessments, evaluator)
@@ -971,7 +1407,7 @@ func isOperationalRegression(latencyDelta *float64, tokenDelta *float64) bool {
 func promptFixability(kind string) string {
 	switch kind {
 	case "semantic_equivalence", "cross_context_synthesis", "presentation_format",
-		"implied_disclosure", "output_contract":
+		"implied_disclosure", "output_contract", "unsupported_inference":
 		return "candidate"
 	case "retrieval_context", "operational_regression":
 		return "no"
@@ -1002,8 +1438,10 @@ func failureLabel(kind string) string {
 		"implied_disclosure":              "Implied disclosure",
 		"retrieval_context":               "Retrieval or context",
 		"output_contract":                 "Output contract",
+		"unsupported_inference":           "Unsupported inference",
 		"operational_regression":          "Operational efficiency",
 		"unlocalized_customer_regression": "Unlocalized customer regression",
+		"unlocalized_target_failure":      "Unlocalized Target failure",
 		"other":                           "Other customer regression",
 	}
 	if label := labels[kind]; label != "" {

@@ -6,6 +6,7 @@ describe("parseEvidence", () => {
     expect(parseEvidence('{"case_id":"a"}\n{"case_id":"b"}\n')).toEqual({
       caseCount: 2,
       caseIds: ["a", "b"],
+      format: "combined",
     });
   });
 
@@ -37,6 +38,32 @@ describe("parseEvidence", () => {
   it("rejects invalid or empty evidence", () => {
     expect(() => parseEvidence("")).toThrow("empty");
     expect(() => parseEvidence('{"summary":{}}')).toThrow("No evaluation cases");
+  });
+
+  it("parses Foundry dataset and run exports with nested numeric case IDs", () => {
+    const dataset = parseEvidence(
+      '{"id":1,"query":"q1","candidate_response":"a1"}\n' +
+        '{"id":2,"query":"q2","candidate_response":"a2"}\n',
+    );
+    expect(dataset).toMatchObject({
+      caseCount: 2,
+      caseIds: ["1", "2"],
+      format: "foundry-dataset",
+    });
+
+    const run = parseEvidence(
+      '{"object":"eval.run.output_item","run_id":"run-1","eval_id":"eval-1",' +
+        '"datasource_item":{"id":1,"query":"q1","candidate_response":"a1"},' +
+        '"sample":{"model":"gpt-5.6-sol"}}\n',
+    );
+    expect(run).toMatchObject({
+      caseCount: 1,
+      caseIds: ["1"],
+      format: "foundry-run",
+      runModel: "gpt-5.6-sol",
+      runId: "run-1",
+      evaluationId: "eval-1",
+    });
   });
 });
 
