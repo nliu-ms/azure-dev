@@ -2,6 +2,11 @@
 
 This guide provides best practices for developing and extending the `azure.ai.models` extension. It is designed to be used by developers and AI coding assistants (like GitHub Copilot) to ensure consistent, high-quality code.
 
+For the local migration Adapt intake, see
+[Reviewed evaluation mapping](evaluation-mapping.md): unified 1-3-file upload,
+editable mappings, preview/confirmation and the boundary between mapping and
+PromptV2 optimization.
+
 ---
 
 ## Project Structure

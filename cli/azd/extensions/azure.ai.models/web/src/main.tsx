@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Badge,
@@ -24,8 +24,15 @@ import {
   statusLabel,
   type ModelDeployment,
 } from "./retirement";
-import { parseEvidence, type EvidenceSummary } from "./evidence";
+import { EvaluationMappingIntake } from "./EvaluationMappingIntake";
+import { appendMappedEvidence, createMappingDraft, type ConfirmedMapping } from "./evaluationMapping";
 import { buildPromptDiff } from "./promptDiff";
+import { PromptOptimizationRequest } from "./PromptOptimizationRequest";
+import { createOptimizationForm, type OptimizationPreview } from "./promptOptimization";
+import { EvidenceNotes } from "./EvidenceNotes";
+import { TargetModelPicker } from "./TargetModelPicker";
+import { matchingTargetDeployments, targetModelChoices, targetModelKey, type TargetModelChoice } from "./targetModels";
+import { adaptSteps, canVisitAdaptStep, type AdaptStep } from "./adaptWorkflow";
 import "./styles.css";
 
 type ModelList = {
@@ -100,11 +107,7 @@ type EvidenceArtifact = {
   size: number;
   sha256: string;
   file: File;
-  summary?: EvidenceSummary;
 };
-
-type EvidenceKind = "prompt" | "baseline" | "dataset" | "source" | "target";
-type EvidenceMode = "combined" | "bundle";
 
 type EvaluatorSummary = {
   name: string;
@@ -116,15 +119,6 @@ type EvaluatorSummary = {
   targetAverageScore?: number;
 };
 
-type RegressionPattern = {
-  code: string;
-  label: string;
-  count: number;
-  prevalence: number;
-  caseIds: string[];
-  promptFixable: "candidate" | "no" | "unknown";
-};
-
 type RegressionCase = {
   caseId: string;
   question?: string;
@@ -134,13 +128,14 @@ type RegressionCase = {
   sourceOutput?: string;
   targetOutput?: string;
   evaluatorRationale?: string;
-  failureKind: string;
-  failureDetail?: string;
   expectedReasoning?: string;
   supportingEvidence?: string[];
-  failureSource?: string;
-  promptFixable: "candidate" | "no" | "unknown";
-  confidence: "high" | "medium" | "low";
+  expectedOutput?: unknown;
+  expectedReferences?: unknown;
+  sourceContext?: unknown;
+  targetContext?: unknown;
+  sourceScore?: number;
+  targetScore?: number;
   latencyDeltaPercent?: number;
   tokenDeltaPercent?: number;
 };
@@ -157,6 +152,8 @@ type EvaluationAnalysis = {
   promptSha256: string;
   evaluationSha256: string;
   caseCount: number;
+  comparableCount?: number;
+  unclassifiedCount?: number;
   stable: number;
   regressions: number;
   operationalRegressions: number;
@@ -164,7 +161,6 @@ type EvaluationAnalysis = {
   preExistingFailures: number;
   detectedFields: string[];
   evaluators: EvaluatorSummary[];
-  patterns: RegressionPattern[];
   cases: RegressionCase[];
   warnings?: string[];
 };
@@ -189,6 +185,7 @@ type PromptOptimizationResult = {
   targetSpecific: boolean;
   promptSha256: string;
   evaluationSha256: string;
+  optimizationRequestSha256: string;
 };
 
 type TelemetryPreset = "1h" | "24h" | "7d" | "custom" | "evaluation";
@@ -465,13 +462,6 @@ async function sha256File(file: File): Promise<string> {
     .join("");
 }
 
-async function sha256Text(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 function modelNamesMatch(actual: string | undefined, expected: string): boolean {
   if (!actual || !expected) {
     return true;
@@ -522,6 +512,10 @@ function App() {
   const [recommendation, setRecommendation] = useState<ReplacementRecommendation | null>(null);
   const [recommendationError, setRecommendationError] = useState("");
   const [recommendationLoading, setRecommendationLoading] = useState(false);
+  const [targetChoice, setTargetChoice] = useState<TargetModelChoice | null>(null);
+  const [adaptStep, setAdaptStep] = useState<AdaptStep>("monitor");
+  const [monitorSkipped, setMonitorSkipped] = useState(false);
+  const [optimizationVisited, setOptimizationVisited] = useState(false);
   const [assessment, setAssessment] = useState<TargetAssessment | null>(null);
   const [assessmentError, setAssessmentError] = useState("");
   const [assessmentLoading, setAssessmentLoading] = useState(false);
@@ -534,18 +528,9 @@ function App() {
   const [deploymentOptionsError, setDeploymentOptionsError] = useState("");
   const [deploymentOptionsLoading, setDeploymentOptionsLoading] = useState(false);
   const [promptArtifact, setPromptArtifact] = useState<EvidenceArtifact | null>(null);
-  const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("combined");
-  const [baselineArtifact, setBaselineArtifact] = useState<EvidenceArtifact | null>(null);
-  const [datasetArtifact, setDatasetArtifact] = useState<EvidenceArtifact | null>(null);
-  const [sourceArtifact, setSourceArtifact] = useState<EvidenceArtifact | null>(null);
-  const [targetArtifact, setTargetArtifact] = useState<EvidenceArtifact | null>(null);
-  const [evidenceError, setEvidenceError] = useState<Record<EvidenceKind, string>>({
-    prompt: "",
-    baseline: "",
-    dataset: "",
-    source: "",
-    target: "",
-  });
+  const [mappingEvidence, setMappingEvidence] = useState<ConfirmedMapping | null>(null);
+  const [mappingDraft, setMappingDraft] = useState(createMappingDraft);
+  const [promptError, setPromptError] = useState("");
   const [evaluationAnalysis, setEvaluationAnalysis] =
     useState<EvaluationAnalysis | null>(null);
   const [evaluationAnalysisError, setEvaluationAnalysisError] = useState("");
@@ -565,22 +550,30 @@ function App() {
   const [deploymentMetricsError, setDeploymentMetricsError] = useState("");
   const [deploymentMetricsLoading, setDeploymentMetricsLoading] = useState(false);
   const promptInputRef = useRef<HTMLInputElement>(null);
-  const baselineInputRef = useRef<HTMLInputElement>(null);
-  const datasetInputRef = useRef<HTMLInputElement>(null);
-  const sourceInputRef = useRef<HTMLInputElement>(null);
-  const targetInputRef = useRef<HTMLInputElement>(null);
   const assessmentRequestId = useRef(0);
   const deploymentOptionsRequestId = useRef(0);
   const inventoryRequestId = useRef(0);
   const evaluationAnalysisRequestId = useRef(0);
   const promptOptimizationRequestId = useRef(0);
-  const evidenceReadRequestIds = useRef<Record<EvidenceKind, number>>({
-    prompt: 0,
-    baseline: 0,
-    dataset: 0,
-    source: 0,
-    target: 0,
-  });
+  const promptOptimizationController = useRef<AbortController | null>(null);
+  const promptReadRequestId = useRef(0);
+  const recommendationRequestId = useRef(0);
+  const metricsRequestId = useRef(0);
+  const metricsController = useRef<AbortController | null>(null);
+
+  const confirmMapping = useCallback((evidence: ConfirmedMapping | null) => {
+    evaluationAnalysisRequestId.current += 1;
+    promptOptimizationRequestId.current += 1;
+    promptOptimizationController.current?.abort();
+    setMappingEvidence(evidence);
+    setEvaluationAnalysis(null);
+    setEvaluationAnalysisError("");
+    setEvaluationAnalysisLoading(false);
+    setPromptOptimization(null);
+    setPromptOptimizationError("");
+    setPromptOptimizationLoading(false);
+    setOptimizationVisited(false);
+  }, []);
 
   const scanResource = async (resource: ModelAccount, requestId: number) => {
     const controller = new AbortController();
@@ -716,8 +709,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+    metricsRequestId.current += 1;
+    metricsController.current?.abort();
     setDeploymentMetrics(null);
     setDeploymentMetricsError("");
+    setDeploymentMetricsLoading(false);
+    setMonitorSkipped(false);
   }, [
     adaptSourceDeploymentId,
     adaptTargetDeploymentId,
@@ -756,20 +753,11 @@ function App() {
     };
   }, [data]);
 
-  const existingTargetDeployments = useMemo(() => {
-    if (!recommendation) {
-      return [];
-    }
-    return (data?.models ?? []).filter(
-      (model) =>
-        model.modelName.localeCompare(recommendation.suggestedModel, undefined, {
-          sensitivity: "accent",
-        }) === 0 &&
-        model.modelFormat.localeCompare(recommendation.suggestedFormat, undefined, {
-          sensitivity: "accent",
-        }) === 0,
-    );
-  }, [data, recommendation]);
+  const suggestedTarget: TargetModelChoice | null = recommendation
+    ? { modelName: recommendation.suggestedModel, modelFormat: recommendation.suggestedFormat } : null;
+  const activeTarget = targetChoice ?? suggestedTarget;
+  const targetChoices = targetModelChoices(data?.models ?? [], suggestedTarget, activeTarget);
+  const existingTargetDeployments = matchingTargetDeployments(data?.models ?? [], activeTarget, selectedModel);
 
   const selectedTargetDeployment =
     existingTargetDeployments.find(
@@ -804,57 +792,54 @@ function App() {
   );
   const selectedDeploymentSKU =
     deploymentOptions?.skus.find((sku) => sku.name === selectedSKU) ?? null;
-  const bundleSummary: EvidenceSummary | undefined =
-    datasetArtifact?.summary && sourceArtifact?.summary && targetArtifact?.summary
-      ? {
-          caseCount: datasetArtifact.summary.caseCount,
-          caseIds: datasetArtifact.summary.caseIds,
-          sourceModel: sourceArtifact.summary.runModel,
-          targetModel: targetArtifact.summary.runModel,
-          sourceRunId: sourceArtifact.summary.runId,
-          targetRunId: targetArtifact.summary.runId,
-          format: "foundry-run",
-        }
-      : undefined;
-  const activeEvidenceSummary =
-    evidenceMode === "combined" ? baselineArtifact?.summary : bundleSummary;
+  const activeEvidenceSummary = mappingEvidence?.preview;
   const baselineSourceMatches =
     !activeEvidenceSummary?.sourceModel ||
     !adaptSourceDeployment ||
     modelNamesMatch(activeEvidenceSummary.sourceModel, adaptSourceDeployment.modelName);
   const expectedTargetModel =
-    adaptTargetDeployment?.modelName ?? recommendation?.suggestedModel ?? "";
+    adaptTargetDeployment?.modelName ?? activeTarget?.modelName ?? "";
+  const evaluationTelemetryWindow =
+    mappingEvidence?.preview.startedAt && mappingEvidence.preview.completedAt &&
+    Date.parse(mappingEvidence.preview.startedAt) < Date.parse(mappingEvidence.preview.completedAt)
+      ? { start: mappingEvidence.preview.startedAt, end: mappingEvidence.preview.completedAt } : null;
   const baselineTargetMatches =
     !activeEvidenceSummary?.targetModel ||
     !expectedTargetModel ||
     modelNamesMatch(activeEvidenceSummary.targetModel, expectedTargetModel);
-  const promptHashMatches =
-    !activeEvidenceSummary?.promptSha256 ||
-    !promptArtifact ||
-    activeEvidenceSummary.promptSha256 === promptArtifact.sha256;
   const telemetryWindowReady =
     telemetryWindow.start !== "" &&
     telemetryWindow.end !== "" &&
     Date.parse(telemetryWindow.start) < Date.parse(telemetryWindow.end);
   const evidenceReady =
     promptArtifact !== null &&
-    (evidenceMode === "combined"
-      ? baselineArtifact !== null
-      : datasetArtifact !== null &&
-        sourceArtifact !== null &&
-        targetArtifact !== null) &&
+    mappingEvidence !== null &&
     adaptSourceDeploymentId !== "" &&
     adaptTargetDeploymentId !== "" &&
     adaptTargetDeploymentId !== "planned-target" &&
     baselineSourceMatches &&
-    baselineTargetMatches &&
-    promptHashMatches;
+    baselineTargetMatches;
   const selectedTargetLabel =
     deploymentChoice === "existing" && selectedTargetDeployment
       ? selectedTargetDeployment.deploymentName
-      : `${recommendation?.suggestedModel ?? "gpt-5.4"} · ${createRegion || "Region pending"} · ${
+      : `${activeTarget?.modelName ?? "Target not selected"} · ${createRegion || "Region pending"} · ${
           selectedDeploymentSKU ? skuLabel(selectedDeploymentSKU.name) : "SKU pending"
         }`;
+  const monitorComplete = deploymentMetrics !== null || monitorSkipped;
+  const evaluationComplete = Boolean(
+    evidenceReady && evaluationAnalysis && !evaluationAnalysisLoading &&
+    evaluationAnalysis.promptSha256 === promptArtifact?.sha256 &&
+    evaluationAnalysis.evaluationSha256 === mappingEvidence?.preview.evaluationSha256,
+  );
+  const canVisitEvaluation = canVisitAdaptStep("evaluation", monitorComplete, evaluationComplete);
+  const canVisitOptimization = canVisitAdaptStep("optimization", monitorComplete, evaluationComplete);
+  useEffect(() => {
+    if (adaptStep !== "monitor" && !monitorComplete) {
+      setAdaptStep("monitor");
+    } else if (adaptStep === "optimization" && !evaluationComplete) {
+      setAdaptStep("evaluation");
+    }
+  }, [adaptStep, monitorComplete, evaluationComplete]);
   const promptDiff = useMemo(
     () =>
       promptOptimization
@@ -865,40 +850,41 @@ function App() {
         : [],
     [promptOptimization],
   );
-  const promptFixableTargetFailureCount =
-    evaluationAnalysis?.cases.filter(
-      (item) =>
-        (item.outcome === "regression" || item.outcome === "pre_existing_failure") &&
-        item.promptFixable === "candidate",
-    ).length ?? 0;
-
   const resetAdaptEvidence = () => {
     evaluationAnalysisRequestId.current += 1;
     promptOptimizationRequestId.current += 1;
-    evidenceReadRequestIds.current.prompt += 1;
-    evidenceReadRequestIds.current.baseline += 1;
-    evidenceReadRequestIds.current.dataset += 1;
-    evidenceReadRequestIds.current.source += 1;
-    evidenceReadRequestIds.current.target += 1;
+    promptOptimizationController.current?.abort();
+    promptReadRequestId.current += 1;
     setPromptArtifact(null);
-    setBaselineArtifact(null);
-    setDatasetArtifact(null);
-    setSourceArtifact(null);
-    setTargetArtifact(null);
-    setEvidenceError({ prompt: "", baseline: "", dataset: "", source: "", target: "" });
+    setMappingEvidence(null);
+    setMappingDraft(createMappingDraft());
+    setPromptError("");
     setEvaluationAnalysis(null);
     setEvaluationAnalysisError("");
     setEvaluationAnalysisLoading(false);
     setPromptOptimization(null);
     setPromptOptimizationError("");
     setPromptOptimizationLoading(false);
+    setAdaptStep("monitor");
+    setMonitorSkipped(false);
+    setOptimizationVisited(false);
+    setAdaptSourceDeploymentId("");
+    setAdaptTargetDeploymentId("");
+    metricsRequestId.current += 1;
+    metricsController.current?.abort();
+    setDeploymentMetrics(null);
+    setDeploymentMetricsError("");
+    setDeploymentMetricsLoading(false);
   };
 
   const openModel = (model: ModelDeployment) => {
+    assessmentRequestId.current += 1;
+    deploymentOptionsRequestId.current += 1;
     setSelectedModel(model);
     setActiveStep("discover");
     setRecommendation(null);
     setRecommendationError("");
+    setTargetChoice(null);
     setAssessment(null);
     setAssessmentError("");
     setDeploymentChoice("new");
@@ -913,10 +899,14 @@ function App() {
   };
 
   const closeModel = () => {
+    recommendationRequestId.current += 1;
+    assessmentRequestId.current += 1;
+    deploymentOptionsRequestId.current += 1;
     setSelectedModel(null);
     setActiveStep("discover");
     setRecommendation(null);
     setRecommendationError("");
+    setTargetChoice(null);
     setAssessment(null);
     setAssessmentError("");
     setDeploymentChoice("new");
@@ -929,6 +919,7 @@ function App() {
   };
 
   const requestRecommendation = async (model: ModelDeployment) => {
+    const requestId = ++recommendationRequestId.current;
     setRecommendationLoading(true);
     setRecommendationError("");
     try {
@@ -948,20 +939,17 @@ function App() {
       if (!response.ok) {
         throw new Error(payload.error ?? `Request failed with status ${response.status}`);
       }
-      setRecommendation(payload as ReplacementRecommendation);
+      if (requestId === recommendationRequestId.current) setRecommendation(payload as ReplacementRecommendation);
     } catch (requestError) {
-      setRecommendationError(
-        requestError instanceof Error ? requestError.message : String(requestError),
-      );
+      if (requestId === recommendationRequestId.current) {
+        setRecommendationError(requestError instanceof Error ? requestError.message : String(requestError));
+      }
     } finally {
-      setRecommendationLoading(false);
+      if (requestId === recommendationRequestId.current) setRecommendationLoading(false);
     }
   };
 
   const requestAssessment = async (existingDeployment: ModelDeployment) => {
-    if (!recommendation) {
-      return;
-    }
     const requestId = ++assessmentRequestId.current;
     setAssessment(null);
     setAssessmentError("");
@@ -976,9 +964,9 @@ function App() {
         body: JSON.stringify({
           resourceGroup: existingDeployment.resourceGroup,
           accountName: existingDeployment.accountName,
-          targetModel: recommendation.suggestedModel,
+          targetModel: existingDeployment.modelName,
           targetVersion: existingDeployment.modelVersion,
-          targetFormat: recommendation.suggestedFormat,
+          targetFormat: existingDeployment.modelFormat,
         }),
       });
       const payload = await response.json();
@@ -1001,8 +989,8 @@ function App() {
     }
   };
 
-  const requestDeploymentOptions = async (region: string) => {
-    if (!selectedModel || !recommendation || !region) {
+  const requestDeploymentOptions = async (region: string, target = activeTarget) => {
+    if (!selectedModel || !target || !region) {
       return;
     }
     const requestId = ++deploymentOptionsRequestId.current;
@@ -1025,8 +1013,8 @@ function App() {
           resourceGroup: selectedModel.resourceGroup,
           accountName: selectedModel.accountName,
           region,
-          targetModel: recommendation.suggestedModel,
-          targetFormat: recommendation.suggestedFormat,
+          targetModel: target.modelName,
+          targetFormat: target.modelFormat,
         }),
         signal: controller.signal,
       });
@@ -1058,7 +1046,9 @@ function App() {
   };
 
   const startAssessment = () => {
-    const existingDeployment = existingTargetDeployments[0] ?? null;
+    const existingDeployment = existingTargetDeployments.find(
+      (model) => deploymentID(model) === selectedTargetDeploymentId,
+    ) ?? existingTargetDeployments[0] ?? null;
     setDeploymentChoice(existingDeployment ? "existing" : "new");
     setSelectedTargetDeploymentId(
       existingDeployment
@@ -1082,6 +1072,7 @@ function App() {
   };
 
   const chooseExistingDeployment = (deployment: ModelDeployment) => {
+    if (deploymentChoice === "existing" && deploymentID(deployment) === selectedTargetDeploymentId && assessment) return;
     deploymentOptionsRequestId.current += 1;
     setDeploymentChoice("existing");
     setSelectedTargetDeploymentId(
@@ -1108,188 +1099,89 @@ function App() {
     }
   };
 
-  const readEvidenceFile = async (kind: EvidenceKind, file: File | null) => {
+  const chooseTargetModel = (choice: TargetModelChoice) => {
+    if (activeTarget && targetModelKey(choice) === targetModelKey(activeTarget)) return;
+    setTargetChoice(choice);
+    assessmentRequestId.current += 1;
+    deploymentOptionsRequestId.current += 1;
+    setAssessment(null);
+    setAssessmentError("");
+    setAssessmentLoading(false);
+    setDeploymentOptions(null);
+    setDeploymentOptionsError("");
+    setDeploymentOptionsLoading(false);
+    setSelectedSKU("");
+    setCreateRegion("");
+    setSelectedTargetDeploymentId("");
+    resetAdaptEvidence();
+    const existing = matchingTargetDeployments(data?.models ?? [], choice, selectedModel)[0];
+    setDeploymentChoice(existing ? "existing" : "new");
+    if (existing) setSelectedTargetDeploymentId(deploymentID(existing));
+    if (activeStep === "assess") {
+      if (existing) {
+        void requestAssessment(existing);
+      } else {
+        const region = selectedModel?.location || regions[0] || "";
+        if (region) void requestDeploymentOptions(region, choice);
+      }
+    }
+  };
+
+  const readPromptFile = async (file: File | null) => {
     if (!file) {
       return;
     }
-    const requestId = ++evidenceReadRequestIds.current[kind];
-    evaluationAnalysisRequestId.current += 1;
-    promptOptimizationRequestId.current += 1;
-    switch (kind) {
-      case "prompt":
-        setPromptArtifact(null);
-        break;
-      case "baseline":
-        setBaselineArtifact(null);
-        break;
-      case "dataset":
-        setDatasetArtifact(null);
-        break;
-      case "source":
-        setSourceArtifact(null);
-        break;
-      case "target":
-        setTargetArtifact(null);
-        break;
-    }
-    setEvidenceError((current) => ({ ...current, [kind]: "" }));
-    setEvaluationAnalysis(null);
-    setEvaluationAnalysisError("");
-    setPromptOptimization(null);
-    setPromptOptimizationError("");
-    setEvaluationAnalysisLoading(false);
-    setPromptOptimizationLoading(false);
+    const requestId = ++promptReadRequestId.current;
+    setPromptArtifact(null);
+    setPromptError("");
+    confirmMapping(null);
     try {
       if (file.size === 0) {
         throw new Error("The file is empty.");
       }
-      const extension = file.name.split(".").at(-1)?.toLowerCase();
-      let summary: EvidenceSummary | undefined;
-      if (kind === "prompt") {
-        const content = await file.text();
-        if (!content.trim()) {
-          throw new Error("The file is empty.");
-        }
-      } else if (extension !== "xlsx") {
-        summary = parseEvidence(await file.text());
-        if (kind === "baseline" && summary.format !== "combined") {
-          throw new Error(
-            "This is a Foundry dataset or run export. Switch to Run bundle and upload all three artifacts.",
-          );
-        }
-        if (kind === "dataset" && summary.format !== "foundry-dataset") {
-          throw new Error("Choose the Foundry generated dataset JSONL file.");
-        }
-        if (
-          (kind === "source" || kind === "target") &&
-          summary.format !== "foundry-run"
-        ) {
-          throw new Error("Choose a Foundry eval.run.output_item results JSONL file.");
-        }
+      if (file.size > 256 * 1024) {
+        throw new Error("The Source prompt exceeds the 256 KB limit.");
+      }
+      if (!(await file.text()).trim()) {
+        throw new Error("The Source prompt is empty.");
       }
       const artifact: EvidenceArtifact = {
         name: file.name,
         size: file.size,
         sha256: await sha256File(file),
         file,
-        summary,
       };
-
-      if (requestId !== evidenceReadRequestIds.current[kind]) {
-        return;
-      }
-      switch (kind) {
-        case "prompt":
-          setPromptArtifact(artifact);
-          break;
-        case "baseline":
-          setBaselineArtifact(artifact);
-          break;
-        case "dataset":
-          setDatasetArtifact(artifact);
-          break;
-        case "source":
-          setSourceArtifact(artifact);
-          break;
-        case "target":
-          setTargetArtifact(artifact);
-          break;
-      }
-      if (kind !== "prompt") {
-        if (artifact.summary?.startedAt && artifact.summary.completedAt) {
-          setTelemetryPreset("evaluation");
-          setTelemetryWindow({
-            start: artifact.summary.startedAt,
-            end: artifact.summary.completedAt,
-          });
-        }
+      if (requestId === promptReadRequestId.current) {
+        setPromptArtifact(artifact);
       }
     } catch (fileError) {
-      if (requestId !== evidenceReadRequestIds.current[kind]) {
-        return;
+      if (requestId === promptReadRequestId.current) {
+        setPromptError(fileError instanceof Error ? fileError.message : String(fileError));
       }
-      switch (kind) {
-        case "prompt":
-          setPromptArtifact(null);
-          break;
-        case "baseline":
-          setBaselineArtifact(null);
-          break;
-        case "dataset":
-          setDatasetArtifact(null);
-          break;
-        case "source":
-          setSourceArtifact(null);
-          break;
-        case "target":
-          setTargetArtifact(null);
-          break;
-      }
-      setEvidenceError((current) => ({
-        ...current,
-        [kind]: fileError instanceof Error ? fileError.message : String(fileError),
-      }));
     }
-  };
-
-  const changeEvidenceMode = (mode: EvidenceMode) => {
-    if (mode === evidenceMode) {
-      return;
-    }
-    evaluationAnalysisRequestId.current += 1;
-    promptOptimizationRequestId.current += 1;
-    setEvidenceMode(mode);
-    setEvaluationAnalysis(null);
-    setEvaluationAnalysisError("");
-    setPromptOptimization(null);
-    setPromptOptimizationError("");
-    setEvaluationAnalysisLoading(false);
-    setPromptOptimizationLoading(false);
-  };
-
-  const appendEvaluationEvidence = (form: FormData) => {
-    if (evidenceMode === "combined" && baselineArtifact) {
-      form.append("evaluation", baselineArtifact.file, baselineArtifact.name);
-      return;
-    }
-    if (datasetArtifact && sourceArtifact && targetArtifact) {
-      form.append("dataset", datasetArtifact.file, datasetArtifact.name);
-      form.append("sourceEvaluation", sourceArtifact.file, sourceArtifact.name);
-      form.append("targetEvaluation", targetArtifact.file, targetArtifact.name);
-    }
-  };
-
-  const currentEvaluationSHA256 = async () => {
-    if (evidenceMode === "combined") {
-      return baselineArtifact?.sha256 ?? "";
-    }
-    if (!datasetArtifact || !sourceArtifact || !targetArtifact) {
-      return "";
-    }
-    return sha256Text(
-      `${datasetArtifact.sha256}:${sourceArtifact.sha256}:${targetArtifact.sha256}`,
-    );
   };
 
   const analyzeEvaluation = async () => {
-    if (!promptArtifact || !evidenceReady) {
+    if (!promptArtifact || !evidenceReady || !mappingEvidence) {
       return;
     }
     const requestId = ++evaluationAnalysisRequestId.current;
     promptOptimizationRequestId.current += 1;
+    promptOptimizationController.current?.abort();
     const expectedPromptSHA256 = promptArtifact.sha256;
-    const expectedEvaluationSHA256 = await currentEvaluationSHA256();
+    const expectedEvaluationSHA256 = mappingEvidence.preview.evaluationSha256;
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 60_000);
     setEvaluationAnalysis(null);
     setEvaluationAnalysisError("");
     setPromptOptimization(null);
     setPromptOptimizationError("");
+    setPromptOptimizationLoading(false);
     setEvaluationAnalysisLoading(true);
     try {
       const form = new FormData();
       form.append("prompt", promptArtifact.file, promptArtifact.name);
-      appendEvaluationEvidence(form);
+      appendMappedEvidence(form, mappingEvidence);
       if (adaptSourceDeployment) {
         form.append("sourceModelName", adaptSourceDeployment.modelName);
       }
@@ -1337,9 +1229,10 @@ function App() {
     }
   };
 
-  const optimizePrompt = async () => {
+  const optimizePrompt = async (preview: OptimizationPreview) => {
     if (
       !promptArtifact ||
+      !mappingEvidence ||
       !evidenceReady ||
       !evaluationAnalysis ||
       !adaptSourceDeployment ||
@@ -1348,26 +1241,29 @@ function App() {
     ) {
       return;
     }
+    if (!preview.withinLimit ||
+        preview.promptSha256 !== promptArtifact.sha256 ||
+        preview.evaluationSha256 !== evaluationAnalysis.evaluationSha256) {
+      setPromptOptimizationError("The reviewed optimization request is no longer current. Prepare it again.");
+      return;
+    }
     const requestId = ++promptOptimizationRequestId.current;
+    promptOptimizationController.current?.abort();
     const expectedPromptSHA256 = promptArtifact.sha256;
-    const expectedEvaluationSHA256 = await currentEvaluationSHA256();
+    const expectedEvaluationSHA256 = mappingEvidence.preview.evaluationSha256;
     const controller = new AbortController();
+    promptOptimizationController.current = controller;
     const timeout = window.setTimeout(() => controller.abort(), 130_000);
     setPromptOptimization(null);
     setPromptOptimizationError("");
     setPromptOptimizationLoading(true);
     try {
-      const form = new FormData();
-      form.append("prompt", promptArtifact.file, promptArtifact.name);
-      appendEvaluationEvidence(form);
-      form.append("sourceModelName", adaptSourceDeployment.modelName);
-      form.append("targetModelName", adaptTargetDeployment.modelName);
-      form.append("optimizerAccountName", promptOptimizerDeployment.accountName);
-      form.append("optimizerModelName", promptOptimizerDeployment.modelName);
-      form.append(
-        "optimizerDeploymentName",
-        promptOptimizerDeployment.deploymentName,
+      const form = createOptimizationForm(
+        promptArtifact.file, mappingEvidence, adaptSourceDeployment.modelName,
+        adaptTargetDeployment.modelName, promptOptimizerDeployment,
       );
+      form.append("allowEvaluationContent", "true");
+      form.append("optimizationRequestSha256", preview.requestSha256);
       const response = await fetch("/api/prompt-optimization", {
         method: "POST",
         headers: {
@@ -1386,7 +1282,8 @@ function App() {
       }
       if (
         result.promptSha256 !== expectedPromptSHA256 ||
-        result.evaluationSha256 !== expectedEvaluationSHA256
+        result.evaluationSha256 !== expectedEvaluationSHA256 ||
+        result.optimizationRequestSha256 !== preview.requestSha256
       ) {
         throw new Error("The PromptV2 result does not match the currently loaded files.");
       }
@@ -1413,11 +1310,15 @@ function App() {
     if (!adaptSourceDeployment || !adaptTargetDeployment || !telemetryWindowReady) {
       return;
     }
+    const requestId = ++metricsRequestId.current;
+    metricsController.current?.abort();
     const controller = new AbortController();
+    metricsController.current = controller;
     const timeout = window.setTimeout(() => controller.abort(), 35_000);
     setDeploymentMetrics(null);
     setDeploymentMetricsError("");
     setDeploymentMetricsLoading(true);
+    setMonitorSkipped(false);
     try {
       const response = await fetch("/api/deployment-metrics", {
         method: "POST",
@@ -1445,18 +1346,18 @@ function App() {
       if (!response.ok) {
         throw new Error(payload.error ?? `Request failed with status ${response.status}`);
       }
-      setDeploymentMetrics(payload as DeploymentMetricsComparison);
+      if (requestId === metricsRequestId.current) setDeploymentMetrics(payload as DeploymentMetricsComparison);
     } catch (requestError) {
-      setDeploymentMetricsError(
-        requestError instanceof DOMException && requestError.name === "AbortError"
-          ? "Azure Monitor metrics query timed out."
-          : requestError instanceof Error
-            ? requestError.message
-            : String(requestError),
-      );
+      if (requestId === metricsRequestId.current) {
+        setDeploymentMetricsError(
+          requestError instanceof DOMException && requestError.name === "AbortError"
+            ? "Azure Monitor metrics query timed out."
+            : requestError instanceof Error ? requestError.message : String(requestError),
+        );
+      }
     } finally {
       window.clearTimeout(timeout);
-      setDeploymentMetricsLoading(false);
+      if (requestId === metricsRequestId.current) setDeploymentMetricsLoading(false);
     }
   };
 
@@ -1464,12 +1365,17 @@ function App() {
     if (!selectedModel) {
       return;
     }
-    setAdaptSourceDeploymentId(deploymentID(selectedModel));
-    setAdaptTargetDeploymentId(
-      selectedTargetDeployment ? deploymentID(selectedTargetDeployment) : "planned-target",
-    );
-    setTelemetryPreset("24h");
-    setTelemetryWindow(presetTelemetryWindow("24h"));
+    const sourceId = deploymentID(selectedModel);
+    const targetId = selectedTargetDeployment ? deploymentID(selectedTargetDeployment) : "planned-target";
+    if (sourceId !== adaptSourceDeploymentId || targetId !== adaptTargetDeploymentId) {
+      setAdaptStep("monitor");
+      setMonitorSkipped(false);
+      setOptimizationVisited(false);
+      setTelemetryPreset("24h");
+      setTelemetryWindow(presetTelemetryWindow("24h"));
+    }
+    setAdaptSourceDeploymentId(sourceId);
+    setAdaptTargetDeploymentId(targetId);
     setActiveStep("adapt");
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -1482,72 +1388,19 @@ function App() {
     selectedDeploymentSKU.quotaCurrent < selectedDeploymentSKU.quotaLimit;
   const canStartAdapt =
     deploymentChoice === "existing"
-      ? selectedTargetDeployment !== null && assessment !== null
+      ? selectedTargetDeployment !== null && assessment !== null && !assessmentLoading
       : newTargetReady;
 
-  if (selectedModel && activeStep === "adapt") {
-    const artifacts: Array<{
-      kind: EvidenceKind;
-      title: string;
-      description: string;
-      accept: string;
-      artifact: EvidenceArtifact | null;
-      inputRef: React.RefObject<HTMLInputElement>;
-    }> = [
-      {
-        kind: "prompt",
-        title: "Source prompt",
-        description: "Exact system/developer prompt used for both unchanged runs.",
-        accept: ".md,.txt,.yaml,.yml,.json",
-        artifact: promptArtifact,
-        inputRef: promptInputRef,
-      },
-      ...(evidenceMode === "combined"
-        ? [
-            {
-              kind: "baseline" as const,
-              title: "Combined evaluation",
-              description:
-                "One paired XLSX/JSON/JSONL containing cases, Source/Target outputs, evaluator results, and metrics.",
-              accept: ".xlsx,.json,.jsonl",
-              artifact: baselineArtifact,
-              inputRef: baselineInputRef,
-            },
-          ]
-        : [
-            {
-              kind: "dataset" as const,
-              title: "Dataset",
-              description:
-                "Foundry generated JSONL with id, query, description, and candidate_response.",
-              accept: ".json,.jsonl",
-              artifact: datasetArtifact,
-              inputRef: datasetInputRef,
-            },
-            {
-              kind: "source" as const,
-              title: "Source results",
-              description:
-                "Foundry eval.run.output_item JSONL produced by the Source model.",
-              accept: ".json,.jsonl",
-              artifact: sourceArtifact,
-              inputRef: sourceInputRef,
-            },
-            {
-              kind: "target" as const,
-              title: "Target results",
-              description:
-                "Foundry eval.run.output_item JSONL produced by the Target model.",
-              accept: ".json,.jsonl",
-              artifact: targetArtifact,
-              inputRef: targetInputRef,
-            },
-          ]),
-    ];
+  const visitAdaptStep = (step: AdaptStep) => {
+    setAdaptStep(step);
+    if (step === "optimization") setOptimizationVisited(true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
+  if (selectedModel && activeStep === "adapt") {
     return (
       <FluentProvider theme={webLightTheme}>
-        <main className="page-shell adapt-page">
+        <main className={`page-shell adapt-page adapt-${adaptStep}`}>
           <div className="ambient ambient-one" />
           <div className="ambient ambient-two" />
 
@@ -1568,19 +1421,46 @@ function App() {
             </div>
             <div className="hero-row">
               <div>
-                <h1>Prepare migration evidence</h1>
+                <h1>{adaptStep === "monitor" ? "Review operational signals"
+                  : adaptStep === "evaluation" ? "Compare your evaluation results" : "Optimize the Source prompt"}</h1>
                 <p>
-                  Use the Source and Target fixed in Discover and Assess, then load their
-                  unchanged comparison results before validation.
+                  Work through each step with Next and Back. Your selected deployments,
+                  uploaded evidence and completed results stay with this comparison.
                 </p>
               </div>
-              <Button appearance="primary" size="large" disabled>
-                Continue to Validate
-              </Button>
             </div>
           </header>
 
-          <section className="comparison-setup">
+          <nav className="adapt-step-nav" aria-label="Adapt steps">
+            {adaptSteps.map((step, index) => {
+              const available = canVisitAdaptStep(step.id, monitorComplete, evaluationComplete);
+              const complete = step.id === "monitor" ? monitorComplete
+                : step.id === "evaluation" ? evaluationComplete : promptOptimization !== null;
+              return (
+                <button
+                  key={step.id}
+                  type="button"
+                  className={adaptStep === step.id ? "active" : complete ? "complete" : ""}
+                  aria-current={adaptStep === step.id ? "step" : undefined}
+                  disabled={!available}
+                  onClick={() => visitAdaptStep(step.id)}
+                >
+                  <span>{index + 1}</span>
+                  <div><strong>{step.label}</strong><small>
+                    {step.id === "monitor" && monitorSkipped ? "Skipped"
+                      : complete ? "Ready" : adaptStep === step.id ? "In progress" : "Next"}
+                  </small></div>
+                </button>
+              );
+            })}
+          </nav>
+          <div className="adapt-pair-summary" aria-label="Selected migration models">
+            <span>Source <strong>{adaptSourceDeployment?.modelName ?? selectedModel.modelName}</strong></span>
+            <span aria-hidden="true">→</span>
+            <span>Target <strong>{expectedTargetModel}</strong></span>
+          </div>
+
+          <section className="comparison-setup adapt-step-panel" hidden={adaptStep !== "monitor"}>
             <div className="evidence-heading">
               <div>
                 <span className="section-kicker">COMPARISON</span>
@@ -1632,13 +1512,15 @@ function App() {
                     setTelemetryPreset(preset);
                     if (preset === "1h" || preset === "24h" || preset === "7d") {
                       setTelemetryWindow(presetTelemetryWindow(preset));
+                    } else if (preset === "evaluation" && evaluationTelemetryWindow) {
+                      setTelemetryWindow(evaluationTelemetryWindow);
                     }
                   }}
                 >
                   <option value="1h">Last 1 hour</option>
                   <option value="24h">Last 24 hours</option>
                   <option value="7d">Last 7 days</option>
-                  {telemetryPreset === "evaluation" && (
+                  {evaluationTelemetryWindow && (
                     <option value="evaluation">Evaluation run window</option>
                   )}
                   <option value="custom">Custom range</option>
@@ -1752,9 +1634,7 @@ function App() {
                           <dd>{formatMetric(value.averageTtltMs, " ms")}</dd>
                         </div>
                       </dl>
-                      {value.warnings?.map((warning) => (
-                        <small key={warning}>{warning}</small>
-                      ))}
+                      <EvidenceNotes notes={value.warnings ?? []} title={`${label} metric notes`} />
                     </article>
                   ))}
                 </div>
@@ -1798,107 +1678,70 @@ function App() {
             )}
           </section>
 
-          <section className="evidence-section">
+          <section className="evidence-section adapt-step-panel" hidden={adaptStep === "monitor"}>
+            <div className="evaluation-intake-step adapt-step-panel" hidden={adaptStep !== "evaluation"}>
             <div className="evidence-heading">
               <div>
                 <span className="section-kicker">EVALUATION RESULTS</span>
-                <h2>Load the unchanged comparison</h2>
+                <h2>Bring your data. Review the mapping.</h2>
                 <p>
-                  Use one paired comparison export, or assemble a Foundry bundle from the
-                  dataset and the two independently downloaded model runs.
+                  Upload the Source prompt and 1–3 evaluation files in any order.
+                  Review how they become one comparable set of Source and Target evidence.
                 </p>
               </div>
               <Badge appearance="tint" color={evidenceReady ? "success" : "warning"}>
                 {evidenceReady
                   ? "Ready to analyze"
-                  : evidenceMode === "combined"
-                    ? "2 artifacts required"
-                    : "4 artifacts required"}
+                  : "Mapping confirmation required"}
               </Badge>
             </div>
 
-            <div className="evidence-mode-switch" aria-label="Evaluation evidence format">
-              <button
-                type="button"
-                className={evidenceMode === "combined" ? "active" : ""}
-                onClick={() => changeEvidenceMode("combined")}
-              >
-                <strong>Combined export</strong>
-                <span>Meera or canonical paired evidence</span>
-              </button>
-              <button
-                type="button"
-                className={evidenceMode === "bundle" ? "active" : ""}
-                onClick={() => changeEvidenceMode("bundle")}
-              >
-                <strong>Run bundle</strong>
-                <span>Foundry dataset + Source + Target</span>
-              </button>
-            </div>
-
-            <div className="evidence-grid">
-              {artifacts.map(({ kind, title, description, accept, artifact, inputRef }, index) => (
-                <article
-                  key={kind}
-                  className={`evidence-card ${artifact ? "ready" : ""}`}
-                >
-                  <input
-                    ref={inputRef}
-                    type="file"
-                    accept={accept}
-                    hidden
-                    onChange={(event) =>
-                      void readEvidenceFile(kind, event.target.files?.[0] ?? null)
-                    }
-                  />
-                  <div className="evidence-card-topline">
-                    <span className="evidence-number">0{index + 1}</span>
-                    <Badge
-                      appearance="tint"
-                      color={artifact ? "success" : "informative"}
-                    >
-                      {artifact ? "Ready" : "Required"}
-                    </Badge>
-                  </div>
-                  <h3>{artifact?.name ?? title}</h3>
-                  <p>
-                    {artifact
-                      ? `${formatBytes(artifact.size)} · SHA-256 ${artifact.sha256.slice(0, 10)}…`
-                      : description}
-                  </p>
-                  {artifact?.summary && (
-                    <strong>{artifact.summary.caseCount} cases detected</strong>
-                  )}
-                  <Button appearance="secondary" onClick={() => inputRef.current?.click()}>
-                    {artifact ? "Replace file" : "Choose file"}
-                  </Button>
-                  {evidenceError[kind] && <em>{evidenceError[kind]}</em>}
-                </article>
-              ))}
-            </div>
-
-            {!promptHashMatches && (
-              <MessageBar intent="error">
-                <MessageBarBody>
-                  Source prompt hash does not match suite.prompt_sha256 in the evaluation
-                  result.
-                </MessageBarBody>
-              </MessageBar>
-            )}
-            {!telemetryWindowReady && (
-              <MessageBar intent="error">
-                <MessageBarBody>
-                  Select a valid telemetry window with an end time after its start time.
-                </MessageBarBody>
-              </MessageBar>
-            )}
-
+            <article className={`mapping-prompt ${promptArtifact ? "ready" : ""}`}>
+              <input
+                ref={promptInputRef}
+                type="file"
+                accept=".md,.txt,.yaml,.yml,.json"
+                hidden
+                onChange={(event) => {
+                  void readPromptFile(event.target.files?.[0] ?? null);
+                  event.target.value = "";
+                }}
+              />
+              <div>
+                <span className="section-kicker">SOURCE PROMPT / SEPARATE FROM EVALUATION DATA</span>
+                <h3>{promptArtifact?.name ?? "The prompt used for the comparison"}</h3>
+                <p>{promptArtifact
+                  ? `${formatBytes(promptArtifact.size)} · SHA-256 ${promptArtifact.sha256.slice(0, 10)}…`
+                  : "Upload the original system/developer prompt. Maximum 256 KB."}</p>
+                {promptError && <p className="mapping-input-error" role="alert">{promptError}</p>}
+              </div>
+              <Button appearance="secondary" onClick={() => promptInputRef.current?.click()}>
+                {promptArtifact ? "Replace prompt" : "Choose Source prompt"}
+              </Button>
+            </article>
+            <EvaluationMappingIntake
+              token={token}
+              prompt={promptArtifact}
+              sourceModel={adaptSourceDeployment?.modelName ?? ""}
+              targetModel={expectedTargetModel}
+              contextKey={JSON.stringify([
+                promptArtifact?.sha256,
+                adaptSourceDeploymentId,
+                adaptSourceDeployment?.modelName,
+                adaptTargetDeploymentId,
+                expectedTargetModel,
+              ])}
+              optimizer={promptOptimizerDeployment}
+              onConfirm={confirmMapping}
+              draft={mappingDraft}
+              onDraftChange={setMappingDraft}
+            />
             <div className="analysis-action">
               <div>
                 <strong>Analyze the customer-provided evaluation</strong>
                 <span>
-                  Files are joined by case ID and checked for matching queries, references,
-                  run lineage, evaluator results, and Source/Target model identity.
+                  Uses the mapping you confirmed. Changing files, roles, fields or pass
+                  rules requires a fresh preview and invalidates previous results.
                 </span>
               </div>
               <Button
@@ -1927,9 +1770,7 @@ function App() {
                   <div>
                     <span className="section-kicker">RESULT SUMMARY</span>
                     <h3>
-                      {evidenceMode === "combined"
-                        ? baselineArtifact?.name
-                        : "Foundry evaluation bundle"}
+                      Mapped evaluation evidence
                     </h3>
                   </div>
                   <Badge
@@ -1939,7 +1780,9 @@ function App() {
                     }
                   >
                     {baselineSourceMatches && baselineTargetMatches
-                      ? "Deployments matched"
+                      ? activeEvidenceSummary.sourceModel && activeEvidenceSummary.targetModel
+                        ? "Reported models matched"
+                        : "Roles confirmed · model metadata incomplete"
                       : "Deployment mismatch"}
                   </Badge>
                 </div>
@@ -1975,15 +1818,15 @@ function App() {
                   </div>
                   <div>
                     <span>Stable</span>
-                    <strong>{activeEvidenceSummary.stable ?? "—"}</strong>
+                    <strong>{evaluationAnalysis?.stable ?? "—"}</strong>
                   </div>
                   <div>
                     <span>Regressions</span>
-                    <strong>{activeEvidenceSummary.regressions ?? "—"}</strong>
+                    <strong>{evaluationAnalysis?.regressions ?? "—"}</strong>
                   </div>
                   <div>
                     <span>Improvements</span>
-                    <strong>{activeEvidenceSummary.improvements ?? "—"}</strong>
+                    <strong>{evaluationAnalysis?.improvements ?? "—"}</strong>
                   </div>
                 </div>
                 {!baselineSourceMatches && (
@@ -2004,9 +1847,11 @@ function App() {
                 )}
               </div>
             )}
+            </div>
 
             {evaluationAnalysis && (
               <div className="regression-analysis">
+                <div className="evaluation-results-step adapt-step-panel" hidden={adaptStep !== "evaluation"}>
                 <div className="evaluation-result-heading">
                   <div>
                     <span className="section-kicker">REGRESSION ANALYSIS</span>
@@ -2053,6 +1898,16 @@ function App() {
                   ))}
                 </div>
 
+                {evaluationAnalysis.comparableCount !== undefined &&
+                  evaluationAnalysis.unclassifiedCount !== undefined && (
+                  <p className="mapping-help">
+                    Quality comparison covers <strong>{evaluationAnalysis.comparableCount}</strong>
+                    {" "}comparable pairs out of {evaluationAnalysis.caseCount} imported cases.
+                    {" "}{evaluationAnalysis.unclassifiedCount} cases remain unclassified;
+                    missing or errored grades are not counted as quality failures.
+                  </p>
+                )}
+
                 <div className="analysis-grid">
                   <section className="analysis-panel">
                     <div className="analysis-panel-heading">
@@ -2095,39 +1950,17 @@ function App() {
                   <section className="analysis-panel">
                     <div className="analysis-panel-heading">
                       <div>
-                        <span className="section-kicker">FAILURE PATTERNS</span>
-                        <strong>Recurring Target failure patterns</strong>
+                        <span className="section-kicker">OBSERVATIONS, NOT DIAGNOSES</span>
+                        <strong>What this comparison establishes</strong>
                       </div>
                     </div>
-                    <div className="pattern-list">
-                      {evaluationAnalysis.patterns.map((pattern) => (
-                        <article key={pattern.code}>
-                          <div>
-                            <strong>{pattern.label}</strong>
-                            <span>{pattern.caseIds.join(", ")}</span>
-                          </div>
-                          <div>
-                            <strong>{pattern.count}</strong>
-                            <span>{Math.round(pattern.prevalence * 100)}% of cases</span>
-                          </div>
-                          <Badge
-                            appearance="tint"
-                            color={
-                              pattern.promptFixable === "candidate"
-                                ? "success"
-                                : pattern.promptFixable === "no"
-                                  ? "informative"
-                                  : "warning"
-                            }
-                          >
-                            {pattern.promptFixable === "candidate"
-                              ? "Prompt-fixable"
-                              : pattern.promptFixable === "no"
-                                ? "Outside prompt"
-                                : "Needs review"}
-                          </Badge>
-                        </article>
-                      ))}
+                    <div className="comparison-explanation">
+                      <p>Imported grades determine regressions, improvements and residual failures.
+                        Operational changes are reported separately.</p>
+                      <p>Evaluator feedback remains evidence. This page does not decide the root cause
+                        or require a prompt-fixability label before optimization.</p>
+                      <p>PromptV2 receives the observed problem cases and proposes a candidate.
+                        A new evaluation is required before claiming any issue is fixed.</p>
                     </div>
                   </section>
                 </div>
@@ -2136,17 +1969,27 @@ function App() {
                   <div className="analysis-panel-heading">
                     <div>
                       <span className="section-kicker">CASE EVIDENCE</span>
-                      <strong>Target failures reported by the customer evaluation</strong>
+                      <strong>Observed regressions, residual failures and operational changes</strong>
                     </div>
                     <span>{evaluationAnalysis.cases.length} cases</span>
                   </div>
-                  <div className="regression-case-list">
+                  {evaluationAnalysis.cases.length > 0 && (
+                    <p className="case-scroll-hint">
+                      Expand a case for details. Scroll within the list to explore all cases.
+                    </p>
+                  )}
+                  <div
+                    className="regression-case-list"
+                    role="region"
+                    aria-label="Case evidence"
+                    tabIndex={evaluationAnalysis.cases.length > 0 ? 0 : -1}
+                  >
                     {evaluationAnalysis.cases.map((item) => (
                       <details key={item.caseId}>
                         <summary>
                           <span>
                             <strong>{item.caseId}</strong>
-                            <small>{item.question || item.failureDetail}</small>
+                            <small>{item.question || "Input not supplied"}</small>
                           </span>
                           <Badge
                             appearance="tint"
@@ -2156,7 +1999,8 @@ function App() {
                                 : "danger"
                             }
                           >
-                            {item.failureKind.replaceAll("_", " ")}
+                            {item.outcome === "regression" ? "Regression"
+                              : item.outcome === "pre_existing_failure" ? "Residual failure" : "Operational change"}
                           </Badge>
                           <span className="case-transition">
                             {item.sourceStatus} → {item.targetStatus}
@@ -2173,83 +2017,49 @@ function App() {
                           </article>
                         </div>
                         <div className="case-diagnosis">
-                          <strong>{item.failureDetail || item.evaluatorRationale}</strong>
-                          {item.evaluatorRationale &&
-                            item.evaluatorRationale !== item.failureDetail && (
-                              <p>Evaluator: {item.evaluatorRationale}</p>
-                            )}
+                          <strong>Evaluator feedback</strong>
+                          <p>{item.evaluatorRationale || "No evaluator rationale supplied."}</p>
                           {item.expectedReasoning && (
-                            <p>Expected reasoning: {item.expectedReasoning}</p>
+                            <p>Provided reasoning guidance: {item.expectedReasoning}</p>
                           )}
-                          <small>
-                            Confidence {item.confidence} ·{" "}
-                            {item.promptFixable === "candidate"
-                              ? "Prompt-fixable candidate"
-                              : item.promptFixable === "no"
-                                ? "Not a Prompt fix"
-                                : "Needs more evidence"}
-                          </small>
+                          {([
+                            ["Expected output", item.expectedOutput],
+                            ["Expected references", item.expectedReferences],
+                            ["Source context", item.sourceContext],
+                            ["Target context", item.targetContext],
+                          ] as const).filter(([, value]) => value !== undefined && value !== null).map(([label, value]) => (
+                            <details className="case-additional-evidence" key={label}>
+                              <summary>{label}</summary>
+                              <pre>{typeof value === "string" ? value : JSON.stringify(value, null, 2)}</pre>
+                            </details>
+                          ))}
                         </div>
                       </details>
                     ))}
                   </div>
                 </section>
+                <EvidenceNotes notes={evaluationAnalysis.warnings ?? []} title="Evaluation notes" />
+                </div>
 
-                <section className="prompt-optimization">
-                  <div className="prompt-optimization-heading">
-                    <div>
-                      <span className="section-kicker">PROMPT OPTIMIZATION</span>
-                      <h3>Generate an evidence-backed PromptV2 candidate</h3>
-                      <p>
-                        PromptV2 receives the Source prompt plus server-derived pattern
-                        counts and directives from {promptFixableTargetFailureCount}{" "}
-                        prompt-fixable Target failure
-                        {promptFixableTargetFailureCount === 1 ? "" : "s"}, including
-                        migration regressions and residual failures. Customer free text,
-                        operational failures, and retrieval failures stay outside the
-                        instruction channel. The rewrite runs on{" "}
-                        {promptOptimizerDeployment
-                          ? `${promptOptimizerDeployment.modelName} · ${promptOptimizerDeployment.deploymentName}`
-                          : "a compatible GPT-5.2 deployment"}.
-                      </p>
-                    </div>
-                    <Button
-                          className="prompt-optimize-button"
-                          appearance="primary"
-                          icon={<span aria-hidden="true">✦</span>}
-                          disabled={
-                            promptOptimizationLoading ||
-                            promptFixableTargetFailureCount === 0 ||
-                            promptOptimizerDeployment === null
-                          }
-                          onClick={() => void optimizePrompt()}
-                    >
-                          {promptOptimizationLoading
-                            ? "Optimizing…"
-                            : "Prompt optimize"}
-                    </Button>
-                  </div>
+                <section className="prompt-optimization adapt-step-panel" hidden={adaptStep !== "optimization"}>
+                  {optimizationVisited && promptArtifact && mappingEvidence && adaptSourceDeployment && adaptTargetDeployment && (
+                    <PromptOptimizationRequest
+                      token={token}
+                      prompt={promptArtifact}
+                      evidence={mappingEvidence}
+                      analysis={evaluationAnalysis}
+                      sourceModel={adaptSourceDeployment.modelName}
+                      targetModel={adaptTargetDeployment.modelName}
+                      optimizer={promptOptimizerDeployment}
+                      optimizing={promptOptimizationLoading}
+                      onOptimize={(preview) => void optimizePrompt(preview)}
+                    />
+                  )}
 
                   {promptOptimizationLoading && (
                     <div className="analysis-loading">
-                      <Spinner label="Sending Target failure evidence to PromptV2…" />
+                      <Spinner label="Sending the reviewed prompt and complete problem-case evidence to PromptV2…" />
                     </div>
-                  )}
-                  {promptFixableTargetFailureCount === 0 && (
-                    <MessageBar intent="warning">
-                      <MessageBarBody>
-                        No prompt-fixable Target failures were found. PromptV2 will not
-                        rewrite the prompt for operational or retrieval failures.
-                      </MessageBarBody>
-                    </MessageBar>
-                  )}
-                  {!promptOptimizerDeployment && (
-                    <MessageBar intent="warning">
-                      <MessageBarBody>
-                        No GPT-5.2 deployment was found in the selected subscription.
-                        PromptV2 needs a real GPT-5.2 deployment to run the optimizer.
-                      </MessageBarBody>
-                    </MessageBar>
                   )}
                   {promptOptimizationError && (
                     <MessageBar intent="error">
@@ -2286,7 +2096,8 @@ function App() {
                         </div>
                         <div>
                           <span>Optimization mode</span>
-                          <strong>Target-failure-steered</strong>
+                          <strong>{promptOptimization.verificationCaseIds.length > 0
+                            ? "Evaluation-evidence-steered" : "General prompt improvement"}</strong>
                           <small>
                             {promptOptimization.targetSpecific
                               ? "Target-specific"
@@ -2347,19 +2158,63 @@ function App() {
                   )}
                 </section>
 
-                {evaluationAnalysis.warnings?.map((warning) => (
-                  <MessageBar key={warning} intent="warning">
-                    <MessageBarBody>{warning}</MessageBarBody>
-                  </MessageBar>
-                ))}
               </div>
             )}
           </section>
+
+          <nav className="adapt-step-actions" aria-label="Adapt step actions">
+            <Button
+              disabled={adaptStep === "monitor"}
+              onClick={() => visitAdaptStep(adaptStep === "optimization" ? "evaluation" : "monitor")}
+            >
+              Back
+            </Button>
+            <span>Step {adaptSteps.findIndex((step) => step.id === adaptStep) + 1} of 3</span>
+            <div>
+              {adaptStep === "monitor" ? (
+                <>
+                  {!deploymentMetrics && (
+                    <Button
+                      disabled={deploymentMetricsLoading || !adaptSourceDeployment || !adaptTargetDeployment}
+                      onClick={() => {
+                        setMonitorSkipped(true);
+                        visitAdaptStep("evaluation");
+                      }}
+                    >
+                      Skip Azure Monitor
+                    </Button>
+                  )}
+                  <Button appearance="primary" disabled={!canVisitEvaluation} onClick={() => visitAdaptStep("evaluation")}>
+                    Next: Evaluation data
+                  </Button>
+                </>
+              ) : adaptStep === "evaluation" ? (
+                <Button appearance="primary" disabled={!canVisitOptimization} onClick={() => visitAdaptStep("optimization")}>
+                  Next: Prompt optimization
+                </Button>
+              ) : (
+                <Button
+                  appearance="primary"
+                  disabled={!promptOptimization}
+                  onClick={() => {
+                    if (promptOptimization) downloadText(
+                      `${promptOptimization.optimizerDeployment}-optimized-prompt.txt`, promptOptimization.optimizedPrompt,
+                    );
+                  }}
+                >
+                  Download candidate
+                </Button>
+              )}
+            </div>
+          </nav>
 
           <footer>
             Adapt uses customer evaluation evidence to generate a PromptV2 candidate.
             Validation still requires rerunning the same evaluation in the customer runner,
             CI pipeline, or Foundry Evaluation.
+            <a className="mapping-attribution" href="https://deerflow.tech" target="_blank" rel="noreferrer">
+              Created By Deerflow
+            </a>
           </footer>
         </main>
       </FluentProvider>
@@ -2390,7 +2245,7 @@ function App() {
             </div>
             <div className="hero-row">
               <div>
-                <h1>Assess {recommendation?.suggestedModel ?? "target model"}</h1>
+                <h1>Assess {activeTarget?.modelName ?? "target model"}</h1>
                 <p>
                   Reuse an existing target deployment or start a new deployment.
                 </p>
@@ -2415,7 +2270,7 @@ function App() {
             <span className="route-arrow">→</span>
             <div className="target">
               <span>Target</span>
-              <strong>{recommendation?.suggestedModel ?? "GPT-5.4"}</strong>
+              <strong>{activeTarget?.modelName ?? "Target not selected"}</strong>
               <small>
                 {deploymentChoice === "existing" && selectedTargetDeployment
                   ? selectedTargetDeployment.deploymentName
@@ -2522,11 +2377,7 @@ function App() {
                     <MessageBarBody>{deploymentOptionsError}</MessageBarBody>
                   </MessageBar>
                 )}
-                {deploymentOptions?.warnings?.map((warning) => (
-                  <MessageBar key={warning} intent="warning">
-                    <MessageBarBody>{warning}</MessageBarBody>
-                  </MessageBar>
-                ))}
+                <EvidenceNotes notes={deploymentOptions?.warnings ?? []} title="Deployment notes" />
                 {deploymentOptions && !deploymentOptionsLoading && deploymentOptions.skus.length === 0 && (
                   <div className="deployment-empty">
                     <strong>No deployable SKU was reported</strong>
@@ -2591,11 +2442,7 @@ function App() {
             </section>
           ) : assessment ? (
             <>
-              {assessment.warnings?.map((warning) => (
-                <MessageBar key={warning} intent="warning">
-                  <MessageBarBody>{warning}</MessageBarBody>
-                </MessageBar>
-              ))}
+              <EvidenceNotes notes={assessment.warnings ?? []} title="Assessment notes" />
 
               <section className="assessment-grid">
                 <article className="assessment-card">
@@ -2702,7 +2549,7 @@ function App() {
                 appearance="primary"
                 size="large"
                 onClick={() => void startAssessment()}
-                disabled={recommendationLoading || !recommendation}
+                disabled={!activeTarget}
               >
                 Migrate
               </Button>
@@ -2771,22 +2618,17 @@ function App() {
 
             <aside className="recommendation-panel" aria-live="polite">
               <span className="section-kicker">TARGET MODEL</span>
-              {recommendationLoading ? (
+              {recommendationLoading && (
                 <div className="recommendation-loading">
                   <Spinner label="Finding a migration target…" />
                 </div>
-              ) : recommendation ? (
-                <div className="recommendation-result">
-                  <span className="recommendation-label">Suggested model</span>
-                  <strong>{recommendation.suggestedModel}</strong>
-                </div>
-              ) : (
-                <div className="recommendation-placeholder">
-                  <Cube20Regular />
-                  <h2>Loading suggestion</h2>
-                  <p>The default target recommendation will appear here.</p>
-                </div>
               )}
+              <TargetModelPicker
+                choices={targetChoices}
+                selected={activeTarget}
+                suggested={suggestedTarget}
+                onChange={chooseTargetModel}
+              />
 
               {recommendationError && (
                 <MessageBar intent="error">
@@ -2796,7 +2638,7 @@ function App() {
             </aside>
           </section>
 
-          <footer>Review the source and suggested target before continuing.</footer>
+          <footer>Review the source and your selected target before continuing.</footer>
         </main>
       </FluentProvider>
     );

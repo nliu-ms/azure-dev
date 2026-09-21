@@ -51,12 +51,17 @@ func runMigrateWeb(
 	if err != nil {
 		return err
 	}
+	mappingProposer, err := migrationweb.NewMappingProposer(credential)
+	if err != nil {
+		return err
+	}
 
 	server, err := migrationweb.NewServer(migrationweb.ServerOptions{
 		Port:            flags.Port,
 		SubscriptionID:  subscriptionID,
 		Provider:        provider,
 		PromptOptimizer: promptOptimizer,
+		MappingProposer: mappingProposer,
 	})
 	if err != nil {
 		return err

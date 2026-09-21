@@ -10,6 +10,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -34,6 +35,8 @@ type EvaluationAnalysis struct {
 	PromptSHA256        string              `json:"promptSha256"`
 	EvaluationSHA256    string              `json:"evaluationSha256"`
 	CaseCount           int                 `json:"caseCount"`
+	ComparableCount     int                 `json:"comparableCount"`
+	UnclassifiedCount   int                 `json:"unclassifiedCount"`
 	Stable              int                 `json:"stable"`
 	Regressions         int                 `json:"regressions"`
 	Operational         int                 `json:"operationalRegressions"`
@@ -43,7 +46,7 @@ type EvaluationAnalysis struct {
 	Evaluators          []EvaluatorSummary  `json:"evaluators"`
 	Patterns            []RegressionPattern `json:"patterns"`
 	Cases               []RegressionCase    `json:"cases"`
-	Warnings            []string            `json:"warnings,omitempty"`
+	Warnings            []string            `json:"warnings"`
 }
 
 // EvaluatorSummary compares pass rates and scores for one evaluator.
@@ -69,42 +72,55 @@ type RegressionPattern struct {
 
 // RegressionCase describes one Target quality failure or operational regression.
 type RegressionCase struct {
-	CaseID              string   `json:"caseId"`
-	Question            string   `json:"question,omitempty"`
-	Outcome             string   `json:"outcome"`
-	SourceStatus        string   `json:"sourceStatus"`
-	TargetStatus        string   `json:"targetStatus"`
-	SourceOutput        string   `json:"sourceOutput,omitempty"`
-	TargetOutput        string   `json:"targetOutput,omitempty"`
-	EvaluatorRationale  string   `json:"evaluatorRationale,omitempty"`
-	FailureKind         string   `json:"failureKind"`
-	FailureDetail       string   `json:"failureDetail,omitempty"`
-	ExpectedReasoning   string   `json:"expectedReasoning,omitempty"`
-	SupportingEvidence  []string `json:"supportingEvidence,omitempty"`
-	FailureSource       string   `json:"failureSource,omitempty"`
-	PromptFixable       string   `json:"promptFixable"`
-	Confidence          string   `json:"confidence"`
-	LatencyDeltaPercent *float64 `json:"latencyDeltaPercent,omitempty"`
-	TokenDeltaPercent   *float64 `json:"tokenDeltaPercent,omitempty"`
+	CaseID                   string   `json:"caseId"`
+	Question                 string   `json:"question,omitempty"`
+	Outcome                  string   `json:"outcome"`
+	SourceStatus             string   `json:"sourceStatus"`
+	TargetStatus             string   `json:"targetStatus"`
+	SourceOutput             string   `json:"sourceOutput,omitempty"`
+	TargetOutput             string   `json:"targetOutput,omitempty"`
+	SourceContext            any      `json:"sourceContext,omitempty"`
+	TargetContext            any      `json:"targetContext,omitempty"`
+	ExpectedOutput           any      `json:"expectedOutput,omitempty"`
+	ExpectedReferences       any      `json:"expectedReferences,omitempty"`
+	SourceScore              *float64 `json:"sourceScore,omitempty"`
+	TargetScore              *float64 `json:"targetScore,omitempty"`
+	SourceEvaluatorRationale string   `json:"sourceEvaluatorRationale,omitempty"`
+	EvaluatorRationale       string   `json:"evaluatorRationale,omitempty"`
+	FailureKind              string   `json:"failureKind"`
+	FailureDetail            string   `json:"failureDetail,omitempty"`
+	ExpectedReasoning        string   `json:"expectedReasoning,omitempty"`
+	SupportingEvidence       []string `json:"supportingEvidence,omitempty"`
+	FailureSource            string   `json:"failureSource,omitempty"`
+	PromptFixable            string   `json:"promptFixable"`
+	Confidence               string   `json:"confidence"`
+	LatencyDeltaPercent      *float64 `json:"latencyDeltaPercent,omitempty"`
+	TokenDeltaPercent        *float64 `json:"tokenDeltaPercent,omitempty"`
 }
 
 type evaluationCase struct {
-	caseID             string
-	question           string
-	sourceOutput       string
-	targetOutput       string
-	sourceLatency      *float64
-	targetLatency      *float64
-	sourceInputTokens  *float64
-	sourceOutputTokens *float64
-	targetInputTokens  *float64
-	targetOutputTokens *float64
-	failureKind        string
-	failureDetail      string
-	expectedReasoning  string
-	supportingEvidence []string
-	failureSource      string
-	assessments        []evaluationAssessment
+	caseID              string
+	question            string
+	sourceOutput        string
+	targetOutput        string
+	sourceContext       any
+	targetContext       any
+	expectedOutput      any
+	expectedReferences  any
+	sourceLatency       *float64
+	targetLatency       *float64
+	sourceInputTokens   *float64
+	sourceOutputTokens  *float64
+	targetInputTokens   *float64
+	targetOutputTokens  *float64
+	failureKind         string
+	failureDetail       string
+	expectedReasoning   string
+	supportingEvidence  []string
+	failureSource       string
+	assessments         []evaluationAssessment
+	selectedQuality     *[3]string
+	selectedAssessments *[2]evaluationAssessment
 }
 
 type evaluationAssessment struct {
@@ -120,6 +136,7 @@ type foundryDatasetItem struct {
 	query             string
 	description       string
 	candidateResponse string
+	expectedOutput    any
 }
 
 type foundryRunItem struct {
@@ -293,6 +310,7 @@ func analyzeFoundryEvaluationBundle(
 		item := evaluationCase{
 			caseID:             caseID,
 			question:           datasetItem.query,
+			expectedOutput:     datasetItem.expectedOutput,
 			sourceOutput:       sourceItem.output,
 			targetOutput:       targetItem.output,
 			sourceLatency:      sourceItem.latency,
@@ -510,6 +528,7 @@ func foundryDatasetItemFromRecord(record map[string]any) (foundryDatasetItem, er
 		query:             stringAt(record, "query"),
 		description:       stringAt(record, "description"),
 		candidateResponse: stringAt(record, "candidate_response"),
+		expectedOutput:    valueAt(record, "candidate_response"),
 	}, nil
 }
 
@@ -528,11 +547,13 @@ func validateFoundryDatasetItem(
 	}{
 		{name: "query", expected: expected.query, actual: actual.query},
 		{name: "description", expected: expected.description, actual: actual.description},
-		{name: "candidate_response", expected: expected.candidateResponse, actual: actual.candidateResponse},
 	} {
 		if field.expected != field.actual {
 			return fmt.Errorf("%s results case %q has a mismatched %s", subject, expected.caseID, field.name)
 		}
+	}
+	if valueStringJSON(expected.expectedOutput) != valueStringJSON(actual.expectedOutput) {
+		return fmt.Errorf("%s results case %q has a mismatched candidate_response", subject, expected.caseID)
 	}
 	return nil
 }
@@ -701,8 +722,15 @@ func readWorkbookXML(files map[string]*zip.File, name string, destination any) e
 		return fmt.Errorf("open %s: %w", name, err)
 	}
 	defer reader.Close()
-	if err := xml.NewDecoder(reader).Decode(destination); err != nil {
+	limited := &io.LimitedReader{R: reader, N: maxWorkbookExpandedBytes + 1}
+	if err := xml.NewDecoder(limited).Decode(destination); err != nil {
 		return fmt.Errorf("parse %s: %w", name, err)
+	}
+	if _, err := io.Copy(io.Discard, limited); err != nil {
+		return fmt.Errorf("read %s: %w", name, err)
+	}
+	if limited.N == 0 {
+		return errors.New("workbook XML exceeds the 64 MB limit")
 	}
 	return nil
 }
@@ -1038,6 +1066,10 @@ func caseFromCanonicalRecord(record map[string]any) (evaluationCase, error) {
 	item := evaluationCase{
 		caseID:             caseID,
 		question:           stringAt(record, "input", "task"),
+		sourceContext:      valueAt(record, "observations", "source", "retrieved_context"),
+		targetContext:      valueAt(record, "observations", "target", "retrieved_context"),
+		expectedOutput:     valueAt(record, "references", "expected_output"),
+		expectedReferences: valueAt(record, "references", "expected_evidence"),
 		sourceOutput:       valueString(valueAt(record, "observations", "source", "output")),
 		targetOutput:       valueString(valueAt(record, "observations", "target", "output")),
 		sourceLatency:      floatAt(record, "observations", "source", "latency_ms"),
@@ -1139,17 +1171,20 @@ func buildEvaluationAnalysis(
 		Cases:          []RegressionCase{},
 		Patterns:       []RegressionPattern{},
 		Evaluators:     summarizeEvaluators(cases),
+		Warnings:       []string{},
 	}
 	patterns := make(map[string]*RegressionPattern)
 	for _, item := range cases {
 		sourceStatus, targetStatus, rationale := qualityAssessment(item)
-		if sourceStatus == "" || targetStatus == "" {
+		if !classifiedMappingStatus(sourceStatus) || !classifiedMappingStatus(targetStatus) {
+			result.UnclassifiedCount++
 			result.Warnings = append(
 				result.Warnings,
 				fmt.Sprintf("Case %s has no paired quality assessment.", item.caseID),
 			)
 			continue
 		}
+		result.ComparableCount++
 		latencyDelta := percentDelta(item.sourceLatency, item.targetLatency)
 		sourceTokens := sumNumbers(item.sourceInputTokens, item.sourceOutputTokens)
 		targetTokens := sumNumbers(item.targetInputTokens, item.targetOutputTokens)
@@ -1187,24 +1222,32 @@ func buildEvaluationAnalysis(
 		}
 
 		promptFixable := promptFixability(failureKind)
+		sourceAssessment, targetAssessment := qualityEvidence(item)
 		regression := RegressionCase{
-			CaseID:              item.caseID,
-			Question:            item.question,
-			Outcome:             outcome,
-			SourceStatus:        sourceStatus,
-			TargetStatus:        targetStatus,
-			SourceOutput:        item.sourceOutput,
-			TargetOutput:        item.targetOutput,
-			EvaluatorRationale:  rationale,
-			FailureKind:         failureKind,
-			FailureDetail:       item.failureDetail,
-			ExpectedReasoning:   item.expectedReasoning,
-			SupportingEvidence:  item.supportingEvidence,
-			FailureSource:       item.failureSource,
-			PromptFixable:       promptFixable,
-			Confidence:          diagnosisConfidence(item.failureSource, item.failureKind),
-			LatencyDeltaPercent: latencyDelta,
-			TokenDeltaPercent:   tokenDelta,
+			CaseID:                   item.caseID,
+			Question:                 item.question,
+			Outcome:                  outcome,
+			SourceStatus:             sourceStatus,
+			TargetStatus:             targetStatus,
+			SourceOutput:             item.sourceOutput,
+			TargetOutput:             item.targetOutput,
+			SourceContext:            item.sourceContext,
+			TargetContext:            item.targetContext,
+			ExpectedOutput:           item.expectedOutput,
+			ExpectedReferences:       item.expectedReferences,
+			SourceScore:              sourceAssessment.score,
+			TargetScore:              targetAssessment.score,
+			SourceEvaluatorRationale: sourceAssessment.rationale,
+			EvaluatorRationale:       rationale,
+			FailureKind:              failureKind,
+			FailureDetail:            item.failureDetail,
+			ExpectedReasoning:        item.expectedReasoning,
+			SupportingEvidence:       item.supportingEvidence,
+			FailureSource:            item.failureSource,
+			PromptFixable:            promptFixable,
+			Confidence:               diagnosisConfidence(item.failureSource, item.failureKind),
+			LatencyDeltaPercent:      latencyDelta,
+			TokenDeltaPercent:        tokenDelta,
 		}
 		result.Cases = append(result.Cases, regression)
 		pattern := patterns[failureKind]
@@ -1234,12 +1277,18 @@ func buildEvaluationAnalysis(
 }
 
 func qualityAssessment(item evaluationCase) (string, string, string) {
-	for _, preferred := range []string{"conclusion-accuracy", "quality"} {
-		source, target, rationale := pairedAssessment(item.assessments, preferred)
-		if source != "" && target != "" {
-			return source, target, rationale
-		}
+	if item.selectedQuality != nil {
+		return item.selectedQuality[0], item.selectedQuality[1], item.selectedQuality[2]
 	}
+	source, target := qualityEvidence(item)
+	return source.status, target.status, target.rationale
+}
+
+func qualityEvidence(item evaluationCase) (evaluationAssessment, evaluationAssessment) {
+	if item.selectedAssessments != nil {
+		return item.selectedAssessments[0], item.selectedAssessments[1]
+	}
+	names := []string{"conclusion-accuracy", "quality"}
 	evaluators := make(map[string]struct{})
 	for _, assessment := range item.assessments {
 		evaluators[assessment.evaluator] = struct{}{}
@@ -1250,18 +1299,26 @@ func qualityAssessment(item evaluationCase) (string, string, string) {
 			!strings.Contains(normalized, "accuracy") {
 			continue
 		}
-		source, target, rationale := pairedAssessment(item.assessments, evaluator)
-		if source != "" && target != "" {
-			return source, target, rationale
+		names = append(names, evaluator)
+	}
+	names = append(names, sortedSetKeys(evaluators)...)
+	for _, evaluator := range names {
+		var source, target evaluationAssessment
+		for _, assessment := range item.assessments {
+			if strings.EqualFold(assessment.evaluator, evaluator) {
+				switch assessment.subject {
+				case "source":
+					source = assessment
+				case "target":
+					target = assessment
+				}
+			}
+		}
+		if source.status != "" && target.status != "" {
+			return source, target
 		}
 	}
-	for _, evaluator := range sortedSetKeys(evaluators) {
-		source, target, rationale := pairedAssessment(item.assessments, evaluator)
-		if source != "" && target != "" {
-			return source, target, rationale
-		}
-	}
-	return "", "", ""
+	return evaluationAssessment{}, evaluationAssessment{}
 }
 
 func pairedAssessment(assessments []evaluationAssessment, evaluator string) (string, string, string) {
@@ -1294,7 +1351,18 @@ func summarizeEvaluators(cases []evaluationCase) []EvaluatorSummary {
 	}
 	values := make(map[string]*accumulator)
 	for _, item := range cases {
+		if item.selectedQuality != nil &&
+			(!classifiedMappingStatus(item.selectedQuality[0]) || !classifiedMappingStatus(item.selectedQuality[1])) {
+			continue
+		}
 		for _, assessment := range item.assessments {
+			if !classifiedMappingStatus(assessment.status) {
+				continue
+			}
+			source, target, _ := pairedAssessment(item.assessments, assessment.evaluator)
+			if !classifiedMappingStatus(source) || !classifiedMappingStatus(target) {
+				continue
+			}
 			current := values[assessment.evaluator]
 			if current == nil {
 				current = &accumulator{}

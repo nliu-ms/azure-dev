@@ -29,6 +29,7 @@ type ServerOptions struct {
 	SubscriptionID  string
 	Provider        ModelProvider
 	PromptOptimizer PromptOptimizer
+	MappingProposer MappingProposer
 }
 
 type Server struct {
@@ -37,6 +38,7 @@ type Server struct {
 	subscriptionID  string
 	provider        ModelProvider
 	promptOptimizer PromptOptimizer
+	mappingProposer MappingProposer
 	token           string
 }
 
@@ -64,6 +66,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 		subscriptionID:  options.SubscriptionID,
 		provider:        options.Provider,
 		promptOptimizer: options.PromptOptimizer,
+		mappingProposer: options.MappingProposer,
 		token:           token,
 	}
 	mux := http.NewServeMux()
@@ -77,6 +80,10 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux.HandleFunc("POST /api/deployment-metrics", server.authorize(server.handleDeploymentMetrics))
 	mux.HandleFunc("POST /api/evaluation-analysis", server.authorize(server.handleEvaluationAnalysis))
 	mux.HandleFunc("POST /api/prompt-optimization", server.authorize(server.handlePromptOptimization))
+	mux.HandleFunc("POST /api/prompt-optimization-preview", server.authorize(server.handlePromptOptimizationPreview))
+	for _, action := range []string{"profile", "preview", "propose"} {
+		mux.HandleFunc("POST /api/evaluation-mapping/"+action, server.authorize(server.handleMappingRequest))
+	}
 	mux.Handle("/", assetHandler(assets()))
 	server.httpServer = &http.Server{
 		Handler:           mux,
@@ -402,7 +409,15 @@ func (s *Server) handleEvaluationAnalysis(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handlePromptOptimization(w http.ResponseWriter, r *http.Request) {
-	if s.promptOptimizer == nil {
+	s.handlePromptOptimizationRequest(w, r, false)
+}
+
+func (s *Server) handlePromptOptimizationPreview(w http.ResponseWriter, r *http.Request) {
+	s.handlePromptOptimizationRequest(w, r, true)
+}
+
+func (s *Server) handlePromptOptimizationRequest(w http.ResponseWriter, r *http.Request, previewOnly bool) {
+	if !previewOnly && s.promptOptimizer == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "PromptV2 is not configured for this migration session.",
 		})
@@ -450,6 +465,9 @@ func (s *Server) handlePromptOptimization(w http.ResponseWriter, r *http.Request
 		ModelName:      strings.TrimSpace(r.FormValue("optimizerModelName")),
 		DeploymentName: strings.TrimSpace(r.FormValue("optimizerDeploymentName")),
 	}
+	promptDigest := sha256.Sum256(prompt)
+	analysis.PromptSHA256 = fmt.Sprintf("%x", promptDigest)
+	analysis.EvaluationSHA256 = evaluationSHA256
 	input, err := buildPromptOptimizationInput(
 		string(prompt),
 		strings.TrimSpace(r.FormValue("sourceModelName")),
@@ -459,6 +477,54 @@ func (s *Server) handlePromptOptimization(w http.ResponseWriter, r *http.Request
 	)
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	wire, body, requestSHA256, err := preparePromptV2Request(input)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	preview := PromptOptimizationPreview{
+		PromptSHA256: analysis.PromptSHA256, EvaluationSHA256: evaluationSHA256, RequestSHA256: requestSHA256,
+		CaseCount: len(input.VerificationCaseIDs), RequestBytes: len(body), MaxRequestBytes: maxPromptV2RequestBytes,
+		WithinLimit: len(body) <= maxPromptV2RequestBytes, Warnings: optimizationWarnings(analysis),
+	}
+	for _, item := range analysis.Cases {
+		switch item.Outcome {
+		case "regression":
+			preview.RegressionCount++
+		case "pre_existing_failure":
+			preview.ResidualFailureCount++
+		case "operational_regression":
+			preview.OperationalCount++
+		}
+	}
+	if preview.WithinLimit {
+		preview.Request = &wire
+	} else {
+		preview.Warnings = append(preview.Warnings, promptV2SizeError(len(body)).Error())
+	}
+	if previewOnly {
+		writeJSON(w, http.StatusOK, preview)
+		return
+	}
+	consent := r.MultipartForm.Value["allowEvaluationContent"]
+	if len(consent) != 1 || consent[0] != "true" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "Explicit allowEvaluationContent=true consent is required " +
+				"before sending evaluation content to PromptV2.",
+		})
+		return
+	}
+	supplied := r.MultipartForm.Value["optimizationRequestSha256"]
+	if len(supplied) != 1 || supplied[0] != requestSHA256 {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "The optimization request preview is missing or stale. Preview the current complete request again.",
+		})
+		return
+	}
+	if !preview.WithinLimit {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": promptV2SizeError(len(body)).Error()})
 		return
 	}
 
@@ -472,10 +538,11 @@ func (s *Server) handlePromptOptimization(w http.ResponseWriter, r *http.Request
 			switch promptError.StatusCode {
 			case http.StatusUnauthorized, http.StatusForbidden:
 				status = http.StatusForbidden
-				message = "PromptV2 access was denied. Sign in with an identity that can access the optimizer Foundry resource."
+				message = "PromptV2 access was denied. " +
+					"Sign in with an identity that can access the optimizer Foundry resource."
 			case http.StatusUnprocessableEntity:
 				status = http.StatusUnprocessableEntity
-				message = "PromptV2 does not support the selected optimizer deployment or optimization request."
+				message = "PromptV2 rejected the selected deployment or request: " + promptError.Message
 			}
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -485,9 +552,14 @@ func (s *Server) handlePromptOptimization(w http.ResponseWriter, r *http.Request
 		writeJSON(w, status, map[string]string{"error": message})
 		return
 	}
-	promptDigest := sha256.Sum256(prompt)
 	result.PromptSHA256 = fmt.Sprintf("%x", promptDigest)
 	result.EvaluationSHA256 = evaluationSHA256
+	result.OptimizationRequestSHA256 = requestSHA256
+	result.TargetSpecific = false
+	if result.Comments == nil {
+		result.Comments = []PromptOptimizerComment{}
+	}
+	result.VerificationCaseIDs = input.VerificationCaseIDs
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -508,6 +580,9 @@ func readUploadedFile(r *http.Request, field string) (string, []byte, error) {
 }
 
 func analyzeUploadedEvaluation(r *http.Request) (EvaluationAnalysis, string, error) {
+	if r.MultipartForm != nil && len(r.MultipartForm.File["files"]) > 0 {
+		return analyzeMappedUpload(r)
+	}
 	if r.MultipartForm != nil && len(r.MultipartForm.File["evaluation"]) > 0 {
 		evaluationName, evaluation, err := readUploadedFile(r, "evaluation")
 		if err != nil {
@@ -592,8 +667,19 @@ func modelNamesCompatible(actual string, expected string) bool {
 		return true
 	}
 	return actual == expected ||
-		strings.HasPrefix(actual, expected+"-") ||
-		strings.HasPrefix(expected, actual+"-")
+		hasModelVersionSuffix(actual, expected) ||
+		hasModelVersionSuffix(expected, actual)
+}
+
+func hasModelVersionSuffix(versioned, base string) bool {
+	suffix, found := strings.CutPrefix(versioned, base+"-")
+	if !found {
+		return false
+	}
+	if _, err := time.Parse("2006-01-02", suffix); err == nil {
+		return true
+	}
+	return len(suffix) == 4 && strings.Trim(suffix, "0123456789") == ""
 }
 
 func normalizeMetricsDeployment(deployment MetricsDeployment) MetricsDeployment {
