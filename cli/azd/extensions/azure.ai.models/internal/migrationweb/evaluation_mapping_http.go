@@ -63,12 +63,22 @@ func readMappingFiles(r *http.Request) ([]mappingFile, error) {
 }
 
 func decodeEvaluationMapping(content string) (EvaluationMapping, error) {
+	return decodeEvaluationMappingJSON(content, true)
+}
+
+func decodeMappingProposal(content string) (EvaluationMapping, error) {
+	return decodeEvaluationMappingJSON(content, false)
+}
+
+func decodeEvaluationMappingJSON(content string, rejectUnknownFields bool) (EvaluationMapping, error) {
 	var plan EvaluationMapping
 	if len(content) == 0 || len(content) > 64*1024 {
 		return plan, errors.New("mapping must be JSON under the 64 KB limit")
 	}
 	decoder := json.NewDecoder(bytes.NewBufferString(content))
-	decoder.DisallowUnknownFields()
+	if rejectUnknownFields {
+		decoder.DisallowUnknownFields()
+	}
 	if err := decoder.Decode(&plan); err != nil {
 		return plan, fmt.Errorf("invalid mapping JSON: %w", err)
 	}
@@ -160,12 +170,6 @@ func (s *Server) handleMappingRequest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, preview)
 		return
 	case "/api/evaluation-mapping/propose":
-		if r.FormValue("allowAI") != "true" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "AI mapping requires explicit allowAI=true consent",
-			})
-			return
-		}
 		if s.mappingProposer == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 				"error": "AI mapping is unavailable; use the manual editor",

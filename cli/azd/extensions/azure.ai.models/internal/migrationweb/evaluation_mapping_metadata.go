@@ -87,6 +87,12 @@ func applyMappingRunMetadata(
 }
 
 func validateMappingPromptMetadata(files []mappingFile, promptHash string, promptPresent bool, preview *MappingPreview) {
+	validateMappingPromptMetadataFor(files, promptHash, promptPresent, "uploaded Source prompt", preview)
+}
+
+func validateMappingPromptMetadataFor(
+	files []mappingFile, promptHash string, promptPresent bool, promptLabel string, preview *MappingPreview,
+) {
 	for _, file := range files {
 		validate := func(value any, caseID string) {
 			declared, present := pointerValue(value, "/suite/prompt_sha256")
@@ -109,7 +115,7 @@ func validateMappingPromptMetadata(files []mappingFile, promptHash string, promp
 					"upload the Source prompt to verify suite.prompt_sha256", caseID)
 			} else if !strings.EqualFold(hash, promptHash) {
 				mappingIssue(preview, "error", "PROMPT_HASH_MISMATCH",
-					"suite.prompt_sha256 does not match the uploaded Source prompt", caseID)
+					"suite.prompt_sha256 does not match the "+promptLabel, caseID)
 			}
 		}
 		validate(file.document, "")

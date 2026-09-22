@@ -79,6 +79,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux.HandleFunc("POST /api/deployment-options", server.authorize(server.handleDeploymentOptions))
 	mux.HandleFunc("POST /api/deployment-metrics", server.authorize(server.handleDeploymentMetrics))
 	mux.HandleFunc("POST /api/evaluation-analysis", server.authorize(server.handleEvaluationAnalysis))
+	mux.HandleFunc("POST /api/evaluation-validation", server.authorize(server.handleEvaluationValidation))
 	mux.HandleFunc("POST /api/prompt-optimization", server.authorize(server.handlePromptOptimization))
 	mux.HandleFunc("POST /api/prompt-optimization-preview", server.authorize(server.handlePromptOptimizationPreview))
 	for _, action := range []string{"profile", "preview", "propose"} {

@@ -33,6 +33,8 @@ import { EvidenceNotes } from "./EvidenceNotes";
 import { TargetModelPicker } from "./TargetModelPicker";
 import { matchingTargetDeployments, targetModelChoices, targetModelKey, type TargetModelChoice } from "./targetModels";
 import { adaptSteps, canVisitAdaptStep, type AdaptStep } from "./adaptWorkflow";
+import { ValidationStep } from "./ValidationStep";
+import type { ValidationResult } from "./validation";
 import "./styles.css";
 
 type ModelList = {
@@ -477,10 +479,10 @@ function modelNamesMatch(actual: string | undefined, expected: string): boolean 
 
 const workflowSteps = ["Discover", "Assess", "Adapt", "Validate", "Roll out", "Retire"];
 
-type WorkflowStep = "discover" | "assess" | "adapt";
+type WorkflowStep = "discover" | "assess" | "adapt" | "validate" | "rollout" | "retire";
 
 function WorkflowNavigation({ activeStep }: { activeStep: WorkflowStep }) {
-  const activeIndex = { discover: 0, assess: 1, adapt: 2 }[activeStep];
+  const activeIndex = { discover: 0, assess: 1, adapt: 2, validate: 3, rollout: 4, retire: 5 }[activeStep];
   return (
     <nav className="workflow-nav" aria-label="Migration workflow">
       <ol>
@@ -539,6 +541,13 @@ function App() {
     useState<PromptOptimizationResult | null>(null);
   const [promptOptimizationError, setPromptOptimizationError] = useState("");
   const [promptOptimizationLoading, setPromptOptimizationLoading] = useState(false);
+  const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
+  const [rolloutAcknowledged, setRolloutAcknowledged] = useState(false);
+  const [retireWindow, setRetireWindow] = useState<"7d" | "30d">("7d");
+  const [retireUsage, setRetireUsage] = useState<DeploymentMetricSummary | null>(null);
+  const [retireUsageError, setRetireUsageError] = useState("");
+  const [retireUsageLoading, setRetireUsageLoading] = useState(false);
+  const retireRequestId = useRef(0);
   const [adaptSourceDeploymentId, setAdaptSourceDeploymentId] = useState("");
   const [adaptTargetDeploymentId, setAdaptTargetDeploymentId] = useState("");
   const [telemetryPreset, setTelemetryPreset] = useState<TelemetryPreset>("24h");
@@ -572,6 +581,12 @@ function App() {
     setPromptOptimization(null);
     setPromptOptimizationError("");
     setPromptOptimizationLoading(false);
+    setValidationResult(null);
+    setRolloutAcknowledged(false);
+    retireRequestId.current += 1;
+    setRetireUsage(null);
+    setRetireUsageError("");
+    setRetireUsageLoading(false);
     setOptimizationVisited(false);
   }, []);
 
@@ -865,6 +880,12 @@ function App() {
     setPromptOptimization(null);
     setPromptOptimizationError("");
     setPromptOptimizationLoading(false);
+    setValidationResult(null);
+    setRolloutAcknowledged(false);
+    retireRequestId.current += 1;
+    setRetireUsage(null);
+    setRetireUsageError("");
+    setRetireUsageLoading(false);
     setAdaptStep("monitor");
     setMonitorSkipped(false);
     setOptimizationVisited(false);
@@ -1256,6 +1277,12 @@ function App() {
     const timeout = window.setTimeout(() => controller.abort(), 130_000);
     setPromptOptimization(null);
     setPromptOptimizationError("");
+    setValidationResult(null);
+    setRolloutAcknowledged(false);
+    retireRequestId.current += 1;
+    setRetireUsage(null);
+    setRetireUsageError("");
+    setRetireUsageLoading(false);
     setPromptOptimizationLoading(true);
     try {
       const form = createOptimizationForm(
@@ -1395,6 +1422,45 @@ function App() {
     setAdaptStep(step);
     if (step === "optimization") setOptimizationVisited(true);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const queryRetireUsage = async () => {
+    if (!adaptSourceDeployment) return;
+    const id = ++retireRequestId.current;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 35_000);
+    const end = new Date();
+    const start = new Date(end.getTime() - (retireWindow === "7d" ? 7 : 30) * 86_400_000);
+    setRetireUsage(null);
+    setRetireUsageError("");
+    setRetireUsageLoading(true);
+    try {
+      const deployment = {
+        resourceId: accountResourceID(adaptSourceDeployment.resourceId),
+        location: adaptSourceDeployment.location,
+        deploymentName: adaptSourceDeployment.deploymentName,
+      };
+      const response = await fetch("/api/deployment-metrics", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: deployment, target: deployment,
+          startTime: start.toISOString(), endTime: end.toISOString(),
+        }),
+        signal: controller.signal,
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? `Usage query failed (${response.status}).`);
+      if (id === retireRequestId.current) setRetireUsage((payload as DeploymentMetricsComparison).source);
+    } catch (failure) {
+      if (id === retireRequestId.current) {
+        setRetireUsageError(failure instanceof DOMException && failure.name === "AbortError"
+          ? "Source usage query timed out." : failure instanceof Error ? failure.message : String(failure));
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      if (id === retireRequestId.current) setRetireUsageLoading(false);
+    }
   };
 
   if (selectedModel && activeStep === "adapt") {
@@ -2193,16 +2259,15 @@ function App() {
                   Next: Prompt optimization
                 </Button>
               ) : (
-                <Button
-                  appearance="primary"
-                  disabled={!promptOptimization}
-                  onClick={() => {
-                    if (promptOptimization) downloadText(
-                      `${promptOptimization.optimizerDeployment}-optimized-prompt.txt`, promptOptimization.optimizedPrompt,
-                    );
-                  }}
-                >
-                  Download candidate
+                <Button appearance="primary" disabled={!promptOptimization} onClick={() => {
+                  if (promptOptimization) {
+                    setValidationResult(null);
+                    setRolloutAcknowledged(false);
+                    setActiveStep("validate");
+                    window.scrollTo({ top: 0, behavior: "smooth" });
+                  }
+                }}>
+                  Continue to Validate
                 </Button>
               )}
             </div>
@@ -2216,6 +2281,187 @@ function App() {
               Created By Deerflow
             </a>
           </footer>
+        </main>
+      </FluentProvider>
+    );
+  }
+
+  if (selectedModel && activeStep === "validate") {
+    const ready = promptArtifact && mappingEvidence && evaluationAnalysis && promptOptimization &&
+      adaptSourceDeployment && adaptTargetDeployment;
+    return (
+      <FluentProvider theme={webLightTheme}>
+        <main className="page-shell lifecycle-page">
+          <div className="ambient ambient-one" /><div className="ambient ambient-two" />
+          <Button appearance="subtle" className="back-button" onClick={() => {
+            setActiveStep("adapt");
+            visitAdaptStep("optimization");
+          }}>← Back to prompt optimization</Button>
+          <WorkflowNavigation activeStep="validate" />
+          <header className="hero">
+            <div className="eyebrow"><span className="eyebrow-mark" />MODEL MIGRATION · VALIDATE</div>
+            <h1>Prove the candidate with the same evaluation</h1>
+            <p>Apply the candidate outside this tool, rerun the Target, and compare the exported results against the baseline.</p>
+          </header>
+          {ready ? (
+            <ValidationStep
+              token={token}
+              sourcePrompt={promptArtifact}
+              evidence={mappingEvidence}
+              sourceModel={adaptSourceDeployment.modelName}
+              targetModel={adaptTargetDeployment.modelName}
+              candidatePrompt={promptOptimization.optimizedPrompt}
+              baselineCaseCount={evaluationAnalysis.caseCount}
+              result={validationResult}
+              onResult={(result) => {
+                setValidationResult(result);
+                setRolloutAcknowledged(false);
+                retireRequestId.current += 1;
+                setRetireUsage(null);
+                setRetireUsageError("");
+              }}
+            />
+          ) : (
+            <MessageBar intent="error">
+              <MessageBarBody>The current comparison has no candidate or confirmed baseline. Return to Adapt.</MessageBarBody>
+            </MessageBar>
+          )}
+          <div className="lifecycle-actions">
+            <Button onClick={() => { setActiveStep("adapt"); visitAdaptStep("optimization"); }}>Back</Button>
+            <Button appearance="primary" disabled={!validationResult} onClick={() => {
+              setActiveStep("rollout"); window.scrollTo({ top: 0, behavior: "smooth" });
+            }}>Continue to Roll out</Button>
+          </div>
+          <footer>Validation compares customer rerun evidence; it does not execute the candidate prompt.</footer>
+        </main>
+      </FluentProvider>
+    );
+  }
+
+  if (selectedModel && activeStep === "rollout") {
+    return (
+      <FluentProvider theme={webLightTheme}>
+        <main className="page-shell lifecycle-page">
+          <div className="ambient ambient-one" /><div className="ambient ambient-two" />
+          <Button appearance="subtle" className="back-button" onClick={() => setActiveStep("validate")}>
+            ← Back to validation
+          </Button>
+          <WorkflowNavigation activeStep="rollout" />
+          <header className="hero">
+            <div className="eyebrow"><span className="eyebrow-mark" />MODEL MIGRATION · ROLL OUT</div>
+            <h1>Prepare the customer-owned rollout</h1>
+            <p>This tool exports a handoff plan. Customer code, configuration, CI/CD, traffic shifting, and rollback remain external.</p>
+          </header>
+          {validationResult ? (
+            <section className="lifecycle-card">
+              <div className="lifecycle-heading">
+                <div><span className="section-kicker">HANDOFF</span><h2>Candidate and validation package</h2></div>
+                <Badge appearance="tint" color={validationResult.readyForRolloutReview ? "success" : "warning"}>
+                  {validationResult.readyForRolloutReview ? "Validation gate passed" : "Validation findings remain"}
+                </Badge>
+              </div>
+              <div className="rollout-grid">
+                <article><span>Source rollback</span><strong>{adaptSourceDeployment?.deploymentName}</strong>
+                  <small>{adaptSourceDeployment?.modelName}</small></article>
+                <article><span>Target</span><strong>{adaptTargetDeployment?.deploymentName ?? "Deployment required"}</strong>
+                  <small>{expectedTargetModel}</small></article>
+                <article><span>Validation</span><strong>{validationResult.resolvedCount} resolved</strong>
+                  <small>{validationResult.remainingCount} remaining · {validationResult.newFailureCount} new</small></article>
+              </div>
+              <ol className="rollout-checklist">
+                {[
+                  "Apply the candidate prompt through the customer-owned configuration and deployment pipeline.",
+                  "Route limited traffic to the Target and keep the Source available for rollback.",
+                  "Monitor quality, errors, latency, token usage, and request volume before wider rollout.",
+                  "Do not retire the Source until the rollback window ends and Source usage is confirmed idle.",
+                ].map((action) => <li key={action}>{action}</li>)}
+              </ol>
+              <label className="mapping-checkbox">
+                <input type="checkbox" checked={rolloutAcknowledged}
+                  onChange={(event) => setRolloutAcknowledged(event.target.checked)} />
+                <span>I understand this tool does not change application configuration or production traffic.
+                  The customer owns rollout, monitoring, rollback, and approval.</span>
+              </label>
+            </section>
+          ) : (
+            <MessageBar intent="error"><MessageBarBody>Complete validation before preparing rollout.</MessageBarBody></MessageBar>
+          )}
+          <div className="lifecycle-actions">
+            <Button onClick={() => setActiveStep("validate")}>Back</Button>
+            <Button appearance="primary" disabled={!rolloutAcknowledged} onClick={() => {
+              setActiveStep("retire"); window.scrollTo({ top: 0, behavior: "smooth" });
+            }}>Continue to Retire review</Button>
+          </div>
+          <footer>No application code, deployment configuration, or traffic is changed by this step.</footer>
+        </main>
+      </FluentProvider>
+    );
+  }
+
+  if (selectedModel && activeStep === "retire") {
+    const requests = retireUsage?.requests;
+    const idle = requests === 0;
+    const ready = Boolean(validationResult?.readyForRolloutReview && rolloutAcknowledged && idle);
+    return (
+      <FluentProvider theme={webLightTheme}>
+        <main className="page-shell lifecycle-page">
+          <div className="ambient ambient-one" /><div className="ambient ambient-two" />
+          <Button appearance="subtle" className="back-button" onClick={() => setActiveStep("rollout")}>
+            ← Back to rollout
+          </Button>
+          <WorkflowNavigation activeStep="retire" />
+          <header className="hero">
+            <div className="eyebrow"><span className="eyebrow-mark" />MODEL MIGRATION · RETIRE</div>
+            <h1>Check Source usage before retirement</h1>
+            <p>Azure Monitor can show whether the Source deployment still receives traffic. This page never deletes or disables it.</p>
+          </header>
+          <section className="lifecycle-card">
+            <div className="lifecycle-heading">
+              <div><span className="section-kicker">SOURCE DEPLOYMENT</span>
+                <h2>{adaptSourceDeployment?.deploymentName ?? "Source unavailable"}</h2></div>
+              <Badge appearance="tint" color={ready ? "success" : retireUsage ? "warning" : "informative"}>
+                {ready ? "Ready for owner review" : "Do not retire yet"}
+              </Badge>
+            </div>
+            <div className="retire-query">
+              <label><span>Usage window</span><select value={retireWindow} onChange={(event) => {
+                retireRequestId.current += 1;
+                setRetireWindow(event.target.value as "7d" | "30d");
+                setRetireUsage(null); setRetireUsageError(""); setRetireUsageLoading(false);
+              }}><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option></select></label>
+              <Button appearance="primary" disabled={!adaptSourceDeployment || retireUsageLoading}
+                onClick={() => void queryRetireUsage()}>
+                {retireUsageLoading ? "Checking usage…" : "Check Source usage"}
+              </Button>
+            </div>
+            {retireUsageLoading && <Spinner label="Querying Source deployment usage from Azure Monitor…" />}
+            {retireUsageError && <MessageBar intent="error"><MessageBarBody>{retireUsageError}</MessageBarBody></MessageBar>}
+            {retireUsage && (
+              <>
+                <div className="retire-metrics">
+                  <article><span>Requests</span><strong>{formatMetric(retireUsage.requests)}</strong></article>
+                  <article><span>Error requests</span><strong>{formatMetric(retireUsage.errorRequests)}</strong></article>
+                  <article><span>Input tokens</span><strong>{formatMetric(retireUsage.processedPromptTokens)}</strong></article>
+                  <article><span>Output tokens</span><strong>{formatMetric(retireUsage.generatedTokens)}</strong></article>
+                </div>
+                <EvidenceNotes notes={retireUsage.warnings ?? []} title="Usage notes" />
+                <div className={`validation-gate ${ready ? "ready" : "blocked"}`}>
+                  <strong>{ready ? "Ready for deployment-owner retirement review" : "Source retirement conditions are not met"}</strong>
+                  <span>{requests === undefined ? "Request count is unavailable."
+                    : requests > 0 ? `${formatMetric(requests)} requests were observed in the selected window.`
+                      : validationResult?.readyForRolloutReview
+                        ? "No Source requests were observed; confirm the rollback window and deployment owner approval."
+                        : "No Source requests were observed, but validation did not pass."}</span>
+                </div>
+              </>
+            )}
+            <MessageBar intent="warning"><MessageBarBody>
+              Zero observed requests does not prove every client migrated. Confirm diagnostic coverage,
+              scheduled workloads, rollback policy, and the deployment owner before any destructive action.
+            </MessageBarBody></MessageBar>
+          </section>
+          <div className="lifecycle-actions"><Button onClick={() => setActiveStep("rollout")}>Back</Button></div>
+          <footer>This preview is read-only. Retirement remains an explicit customer-owned action.</footer>
         </main>
       </FluentProvider>
     );

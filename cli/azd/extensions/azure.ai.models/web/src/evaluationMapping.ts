@@ -2,6 +2,7 @@ export type MappingField = {
   path: string;
   types: string[];
   present: number;
+  distinct: number;
   sample?: string;
 };
 
@@ -182,9 +183,12 @@ export function mappingSchemaPayload(profile: MappingProfile) {
       index: file.index,
       collections: file.collections.map((collection, index) => ({
         id: `collection:${index}`,
+        rowCount: collection.rowCount,
         fields: collection.fields.map((field) => ({
           path: field.path,
           types: field.types,
+          present: field.present,
+          distinct: field.distinct,
         })),
       })),
     })),

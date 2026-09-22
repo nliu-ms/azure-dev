@@ -9,11 +9,9 @@ within the 24 MB request limit, including multipart metadata.
 ## Workflow
 
 Discover and Assess allow the suggested Target or another model. The picker
-lists discovered model/format combinations and supports an explicitly entered
-model name/ARM format. Existing-deployment assessment uses the actual selected
-deployment's name, format and version; a custom model without a discovered
-deployment follows regional deployment preflight. The Source deployment itself
-is excluded as a Target. Changing the Target clears downstream comparison
+lists discovered model/format combinations. Existing-deployment assessment uses
+the actual selected deployment's name, format and version. The Source deployment
+itself is excluded as a Target. Changing the Target clears downstream comparison
 state; selecting a model is not a guarantee that it is available or deployed.
 
 Adapt is divided into **Azure Monitor -> Evaluation data -> Prompt optimization**.
@@ -31,9 +29,10 @@ Within the Evaluation data step:
 1. Choose the unchanged Source prompt.
 2. Add evaluation files. One file may contain both roles; two files may contain
    separate runs; a third may supply dataset inputs/references.
-3. Review the locally detected mapping. Known canonical, Meera and Foundry
-   formats retain their native adapter rules. Use **Customize field mapping**
-   to switch to the explicit general-purpose mapping engine.
+3. The app sends a schema-only payload to the available mapping model
+   automatically and presents its general-purpose suggestion for review. The
+   payload contains field paths/types plus presence/distinct counts: no records,
+   prompts, outputs, filenames, hashes or sample values.
 4. Select Source and Target file/record collections, their case ID, input and
    output fields, and the quality evaluator. For long-format data, add exact
    record-selection conditions to identify each role.
@@ -85,18 +84,23 @@ evidence. A dataset can provide `expectedOutput` alongside its existing
 missing separate context means retrieval failed, since context may be embedded
 in the Question/input. Independently supplied reference values must agree.
 
-## AI suggestions are optional
+## Automatic schema-only AI suggestion
 
-Expand **Suggest mapping with AI** to inspect the structural payload and
-explicitly permit sending it to the displayed Azure OpenAI account/deployment.
-Only field paths/types and structural metadata are used; raw records, prompt
-text, outputs, sample values and filenames are excluded. Field names can still
-be sensitive, so review the payload before approving.
+After profiling JSON, JSONL, CSV or XLSX locally, the app automatically asks the
+available mapping model for a declarative general-purpose mapping. The payload
+contains field paths/types and presence/distinct counts; raw records, prompt
+text, outputs, sample values, filenames and hashes are excluded. The exact
+payload remains visible in the review UI, and a failed/unavailable AI call
+leaves the local fallback and manual editor usable.
 
 The mapper proposes a declarative plan, not generated transformation code.
 Its suggestion is editable and never confirms itself. A failed or unavailable
 AI call leaves the manual editor usable. Mapping uses a separate model client,
 not the PromptV2 optimization endpoint.
+
+Run IDs, latency and answer-model token fields are no longer exposed in the
+mapping editor. They are not required for the quality comparison, and Azure
+Monitor remains the operational-metrics source.
 
 ## Evaluation-export caveats
 
@@ -144,7 +148,7 @@ binding the destination account and request content.
 
 | Field | Meaning |
 |---|---|
-| `allowEvaluationContent=true` | Explicit permission to send prompt/case content; independent from schema-only mapping consent |
+| `allowEvaluationContent=true` | Explicit permission to send prompt/case content; independent from the automatic schema-only mapping request |
 | `optimizationRequestSha256` | The reviewed preview's `requestSha256`; recomputed server-side before sending |
 
 Changing evidence, mapping, prompt or optimizer destination requires a fresh
@@ -161,6 +165,26 @@ prompt. PromptV2 proposes a candidate, possibly unchanged. Customer reruns of
 the same evaluator and dataset are still required before claiming improvements
 or promoting the prompt. The GPT-5.2 optimizer compatibility setting and
 non-target-specific response labeling remain unchanged.
+
+## Validate, Roll out and Retire
+
+Validate accepts one adapted Target rerun in the same mapped schema and joins it
+to the confirmed baseline by case ID. It reports resolved, remaining, new,
+preserved, unclassified, missing and extra cases. The rollout-review gate is
+strict: no remaining/new failures, coverage gaps, unclassified cases or mapping
+errors. A matching exported candidate-prompt hash can verify prompt provenance;
+otherwise the result remains explicitly unverified.
+
+Roll out is a handoff checklist only. It summarizes Source rollback, Target,
+validation counts and customer-owned actions. It does not generate deployment
+artifacts or edit application configuration, CI/CD, deployment settings or
+traffic.
+
+Retire queries the Source deployment's Azure Monitor usage for the selected 7-
+or 30-day window. It is read-only and never deletes or disables a deployment.
+Zero observed requests is only a readiness signal: diagnostic coverage,
+scheduled clients, the rollback window and deployment-owner approval still need
+independent confirmation.
 
 ## Implementation boundary
 

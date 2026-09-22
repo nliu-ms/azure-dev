@@ -187,7 +187,6 @@ func TestOptimizationPreviewConsentDigestAndExactProviderBody(t *testing.T) {
 		status             int
 	}{
 		{"missing consent", "allowEvaluationContent", "", http.StatusBadRequest},
-		{"schema consent is not content consent", "allowAI", "true", http.StatusBadRequest},
 		{"false consent", "allowEvaluationContent", "false", http.StatusBadRequest},
 		{"missing digest", "optimizationRequestSha256", "", http.StatusConflict},
 		{"stale digest", "optimizationRequestSha256", strings.Repeat("0", 64), http.StatusConflict},

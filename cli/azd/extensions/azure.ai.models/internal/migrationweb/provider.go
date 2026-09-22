@@ -61,6 +61,23 @@ func (p *AzureModelProvider) QueryDeploymentMetrics(
 	ctx context.Context,
 	request DeploymentMetricsRequest,
 ) (DeploymentMetricsComparison, error) {
+	if request.Source == request.Target {
+		source, err := p.queryDeploymentMetrics(
+			ctx,
+			request.Source,
+			request.StartTime,
+			request.EndTime,
+		)
+		if err != nil {
+			return DeploymentMetricsComparison{}, fmt.Errorf("query Source deployment metrics: %w", err)
+		}
+		return DeploymentMetricsComparison{
+			StartTime: request.StartTime,
+			EndTime:   request.EndTime,
+			Source:    source,
+			Target:    source,
+		}, nil
+	}
 	var source DeploymentMetricSummary
 	var target DeploymentMetricSummary
 	var sourceErr error

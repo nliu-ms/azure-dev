@@ -546,7 +546,7 @@ func TestReviewedMappingAdditionalProfileBounds(t *testing.T) {
 		file := mappingTestFile(t, 0, "data.json", valueStringJSON(rows))
 		preview, _ := previewMapping([]mappingFile{file}, mappingTestPlan(), "", "")
 		require.False(t, preview.Valid)
-		require.Len(t, preview.Cases, 20)
+		require.Len(t, preview.Cases, 10)
 		require.Equal(t, 21, preview.CaseCount)
 	})
 	t.Run("nesting bound", func(t *testing.T) {

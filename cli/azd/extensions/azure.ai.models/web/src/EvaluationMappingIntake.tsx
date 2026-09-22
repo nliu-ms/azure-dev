@@ -168,21 +168,23 @@ function LaneEditor({
             ))}
           </select>
         </label>
-        <label className="mapping-field">
-          <span>{role} record collection</span>
-          <select
-            aria-label={`${role} record collection`}
-            value={lane.collection}
-            disabled={disabled}
-            onChange={(event) => onChange({ ...lane, collection: event.target.value })}
-          >
-            {file?.collections.map((item) => (
-              <option key={item.path} value={item.path}>
-                {item.path || "Root records"} ({item.rowCount})
-              </option>
-            ))}
-          </select>
-        </label>
+        {(file?.collections.length ?? 0) > 1 && (
+          <label className="mapping-field">
+            <span>{role} record collection</span>
+            <select
+              aria-label={`${role} record collection`}
+              value={lane.collection}
+              disabled={disabled}
+              onChange={(event) => onChange({ ...lane, collection: event.target.value })}
+            >
+              {file?.collections.map((item) => (
+                <option key={item.path} value={item.path}>
+                  {item.path || "Root records"} ({item.rowCount})
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {([
           ["caseId", "Case ID / join key"],
           ["input", "Input"],
@@ -304,26 +306,6 @@ function LaneEditor({
         </div>
       </div>
       <details className="mapping-advanced">
-        <summary>Run identity and operational metrics</summary>
-        <div className="mapping-fields">
-          {([
-            ["runId", "Run ID"],
-            ["latencyMs", "Latency (milliseconds)"],
-            ["inputTokens", "Answer-model input tokens"],
-            ["outputTokens", "Answer-model output tokens"],
-          ] as const).map(([key, label]) => (
-            <PathField
-              key={key}
-              label={`${role} ${label}`}
-              fields={fields}
-              value={lane[key]}
-              disabled={disabled}
-              onChange={(value) => onChange({ ...lane, [key]: value })}
-            />
-          ))}
-        </div>
-      </details>
-      <details className="mapping-advanced">
         <summary>Optional context and reference evidence</summary>
         <p className="mapping-help">
           Map only evidence actually present in the export. Leave missing fields blank.
@@ -356,7 +338,6 @@ export function EvaluationMappingIntake({
   const { files, profile, mapping, preview, acknowledged, confirmed, origin } = draft;
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const [allowAI, setAllowAI] = useState(false);
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const requestId = useRef(0);
@@ -416,7 +397,6 @@ export function EvaluationMappingIntake({
       form.append("targetModelName", targetModel);
       if (currentMapping) form.append("mapping", JSON.stringify(currentMapping));
       if (operation === "propose" && optimizer) {
-        form.append("allowAI", "true");
         form.append("optimizerAccountName", optimizer.accountName);
         form.append("optimizerModelName", optimizer.modelName);
         form.append("optimizerDeploymentName", optimizer.deploymentName);
@@ -457,11 +437,24 @@ export function EvaluationMappingIntake({
     invalidate();
     setError("");
     updateDraft({ files: nextFiles, profile: null, mapping: null });
-    setAllowAI(false);
     if (!nextFiles.length) return;
     const result = await request<MappingProfile>("profile", nextFiles);
     if (result) {
-      updateDraft({ profile: result, mapping: result.mapping, origin: "Detected locally" });
+      updateDraft({
+        profile: result,
+        mapping: result.mapping,
+        origin: optimizer ? "Local fallback while AI maps the schema" : "Detected locally — AI unavailable",
+      });
+      if (optimizer) {
+        const proposed = await request<MappingProfile>("propose", nextFiles);
+        if (proposed) {
+          updateDraft({
+            mapping: proposed.mapping,
+            profile: proposed,
+            origin: "AI suggestion — review required",
+          });
+        }
+      }
     }
   };
 
@@ -495,7 +488,7 @@ export function EvaluationMappingIntake({
   };
 
   const proposeMapping = async () => {
-    if (!profile || !allowAI || !optimizer) return;
+    if (!profile || !optimizer) return;
     invalidate();
     const result = await request<MappingProfile>("propose", files);
     if (result) {
@@ -665,23 +658,27 @@ export function EvaluationMappingIntake({
             </label>
             {mapping.dataset && (
               <div className="mapping-fields">
-                <label className="mapping-field">
-                  <span>Dataset record collection</span>
-                  <select
-                    aria-label="Dataset record collection"
-                    value={mapping.dataset.collection}
-                    disabled={editingDisabled}
-                    onChange={(event) => {
-                      if (mapping.dataset) editMapping({
-                        ...mapping, dataset: { ...mapping.dataset, collection: event.target.value },
-                      });
-                    }}
-                  >
-                    {datasetFile?.collections.map((collection) => (
-                      <option key={collection.path} value={collection.path}>{collection.path || "Root records"}</option>
-                    ))}
-                  </select>
-                </label>
+                {(datasetFile?.collections.length ?? 0) > 1 && (
+                  <label className="mapping-field">
+                    <span>Dataset record collection</span>
+                    <select
+                      aria-label="Dataset record collection"
+                      value={mapping.dataset.collection}
+                      disabled={editingDisabled}
+                      onChange={(event) => {
+                        if (mapping.dataset) editMapping({
+                          ...mapping, dataset: { ...mapping.dataset, collection: event.target.value },
+                        });
+                      }}
+                    >
+                      {datasetFile?.collections.map((collection) => (
+                        <option key={collection.path} value={collection.path}>
+                          {collection.path || "Root records"}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 {(["caseId", "input", "reference", "expectedOutput"] as const).map((key) => (
                   <PathField
                     key={key}
@@ -700,39 +697,32 @@ export function EvaluationMappingIntake({
               </div>
             )}
           </details>
-          <details className="mapping-ai">
-            <summary>Need help with an unfamiliar schema? Suggest mapping with AI</summary>
-            <p>
-              AI suggests rules, never rewrites records. Review and edit the suggestion before applying it.
-              Manual mapping works without AI.
-            </p>
-            {!optimizer ? (
-              <p>No mapping model is available in this session. Continue with the field editor above.</p>
-            ) : (
-              <>
-                <details>
-                  <summary>View the schema payload shared with AI</summary>
-                  <pre>{JSON.stringify(mappingSchemaPayload(profile), null, 2)}</pre>
-                </details>
-                <label className="mapping-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={allowAI}
-                    disabled={busy !== ""}
-                    onChange={(event) => setAllowAI(event.target.checked)}
-                  />
-                  <span>
-                    Send field paths and types to {optimizer.accountName} / {optimizer.deploymentName}
-                    {" "}({optimizer.modelName}). Field names may be sensitive; no raw records, prompts,
-                    outputs, filenames or sample values are sent.
-                  </span>
-                </label>
-                <Button disabled={!allowAI || busy !== ""} onClick={() => void proposeMapping()}>
-                  Suggest mapping with AI
+          <div className="mapping-ai">
+            <div className="mapping-inline-heading">
+              <div>
+                <strong>Schema-only AI mapping</strong>
+                <p>{optimizer
+                  ? `Suggested automatically by ${optimizer.modelName}; review and adjust before preview.`
+                  : "No mapping model is available; review the local fallback manually."}</p>
+              </div>
+              {optimizer && (
+                <Button disabled={busy !== ""} onClick={() => void proposeMapping()}>
+                  Regenerate suggestion
                 </Button>
-              </>
+              )}
+            </div>
+            {optimizer && (
+              <details>
+                <summary>View the schema payload sent automatically</summary>
+                <p>
+                  Only field paths and types are sent to {optimizer.accountName} / {optimizer.deploymentName}.
+                  Presence/distinct counts help identify stable keys. No raw records, prompts, outputs,
+                  filenames, hashes, or sample values are included.
+                </p>
+                <pre>{JSON.stringify(mappingSchemaPayload(profile), null, 2)}</pre>
+              </details>
             )}
-          </details>
+          </div>
           <div className="mapping-preview-action">
             <span>Mapping only reads your data. It does not rerun evaluations or change scores.</span>
             <Button

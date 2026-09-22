@@ -112,8 +112,8 @@ func TestMappingHTTPArraysForEmptyAndPopulatedCollections(t *testing.T) {
 			t.Run(action+"/"+test.name, func(t *testing.T) {
 				server := &Server{mappingProposer: &recordingMappingProposer{}}
 				fields := map[string]string{
-					"allowAI": "true", "optimizerAccountName": "account",
-					"optimizerModelName": "model", "optimizerDeploymentName": "deployment",
+					"optimizerAccountName": "account", "optimizerModelName": "model",
+					"optimizerDeploymentName": "deployment",
 				}
 				response := httptest.NewRecorder()
 				server.handleMappingRequest(response,

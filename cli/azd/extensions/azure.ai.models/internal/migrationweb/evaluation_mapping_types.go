@@ -5,10 +5,11 @@ package migrationweb
 
 // MappingField describes a local record field. Samples never enter an AI proposal.
 type MappingField struct {
-	Path    string   `json:"path"`
-	Types   []string `json:"types"`
-	Present int      `json:"present"`
-	Sample  string   `json:"sample,omitempty"`
+	Path     string   `json:"path"`
+	Types    []string `json:"types"`
+	Present  int      `json:"present"`
+	Distinct int      `json:"distinct"`
+	Sample   string   `json:"sample,omitempty"`
 }
 
 // MappingCollection identifies records by RFC 6901 pointer; XLSX uses /sheets/<escaped sheet name>.

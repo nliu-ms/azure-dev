@@ -22,14 +22,17 @@ import (
 
 // MappingSchemaField contains paths and types only, never a sample or field value.
 type MappingSchemaField struct {
-	Path  string   `json:"path"`
-	Types []string `json:"types"`
+	Path     string   `json:"path"`
+	Types    []string `json:"types"`
+	Present  int      `json:"present"`
+	Distinct int      `json:"distinct"`
 }
 
 // MappingSchemaCollection contains the structure of a local record collection.
 type MappingSchemaCollection struct {
-	ID     string               `json:"id"`
-	Fields []MappingSchemaField `json:"fields"`
+	ID       string               `json:"id"`
+	RowCount int                  `json:"rowCount"`
+	Fields   []MappingSchemaField `json:"fields"`
 }
 
 // MappingSchemaFile identifies an artifact by index, without its customer filename.
@@ -81,13 +84,17 @@ func mappingStructuralProfile(files []mappingFile) []MappingSchemaFile {
 	for _, file := range files {
 		profile := MappingSchemaFile{Index: file.profile.Index, Collections: []MappingSchemaCollection{}}
 		for index, collection := range file.profile.Collections {
-			schema := MappingSchemaCollection{ID: mappingProposalCollectionID(index), Fields: []MappingSchemaField{}}
+			schema := MappingSchemaCollection{
+				ID: mappingProposalCollectionID(index), RowCount: collection.RowCount, Fields: []MappingSchemaField{},
+			}
 			for _, field := range collection.Fields {
 				types := slices.Clone(field.Types)
 				if types == nil {
 					types = []string{}
 				}
-				schema.Fields = append(schema.Fields, MappingSchemaField{Path: field.Path, Types: types})
+				schema.Fields = append(schema.Fields, MappingSchemaField{
+					Path: field.Path, Types: types, Present: field.Present, Distinct: field.Distinct,
+				})
 			}
 			profile.Collections = append(profile.Collections, schema)
 		}
@@ -102,22 +109,111 @@ Suggest paths only from the supplied structure; never invent data, model identit
 When semantics cannot be inferred from paths/types, use empty paths and file -1.
 Do not use row-order or provider IDs as models.
 Use exact stable case ID fields, not observation IDs or export indexes.
+Prefer a case ID whose present and distinct counts both equal its collection rowCount.
 Arrays require explicit review of evaluator selectors.
 Source and target are MappingLane objects with:
-file (integer), collection (string), filters ([]), caseId, input, output, model, runId, latencyMs, inputTokens, outputTokens
-(all RFC6901 pointer strings relative to a record, empty if unresolved),
+file (integer), collection (string), filters ([]), caseId, input, output, model
+(RFC6901 pointer strings relative to a record, empty if unresolved),
 optional context, expectedOutput, expectedReferences (RFC6901 pointer strings),
 evaluator {collection:string, filters:[], status:string, score:string, rationale:string},
 passRule ("reported" or "threshold"), operator ("gte" or "lte").
 Omit threshold: a schema cannot establish it. All filters must be empty arrays: semantic values are not supplied.
+Use reported only for a field whose path clearly represents boolean/pass/fail/success status.
+When status value semantics are unknown but a likely quality score exists, use threshold, map score, and leave threshold null.
+Always map an obvious quality field named score, accuracy, grade or metric; for a numeric-looking accuracy field use threshold.
 Optional dataset is {file:integer, collection:string, caseId:string, input:string, reference:string, expectedOutput?:string}.
 Reference means expected-reference evidence. A requirement description is not necessarily the full runtime input.
 For source, target and dataset collection, return the supplied opaque ID such as "collection:0", not a guessed path.
-Collection names and counts are withheld. Evaluator collection remains a field pointer within the selected record.
+Collection names are withheld; row/presence/distinct counts contain no field values.
+Evaluator collection remains a field pointer within the selected record.
 Do not add explanations or other keys.
 Do not infer success is quality or use aggregate promptfoo grades mixing assertion types.
-For promptfoo use response.tokenUsage prompt/completion, not combined top-level tokenUsage.
 Missing grades are unknown, never false. Proposals cannot confirm themselves.`
+
+func mappingProposalResponseFormat() map[string]any {
+	stringProperty := func() map[string]any { return map[string]any{"type": "string"} }
+	filter := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"path":  stringProperty(),
+			"value": stringProperty(),
+		},
+		"required": []string{"path", "value"},
+	}
+	evaluator := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"collection": stringProperty(),
+			"filters": map[string]any{
+				"type": "array", "items": filter, "maxItems": 0,
+			},
+			"status":    stringProperty(),
+			"score":     stringProperty(),
+			"rationale": stringProperty(),
+		},
+		"required": []string{"collection", "filters", "status", "score", "rationale"},
+	}
+	lane := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"file":               map[string]any{"type": "integer"},
+			"collection":         stringProperty(),
+			"filters":            map[string]any{"type": "array", "items": filter, "maxItems": 0},
+			"caseId":             stringProperty(),
+			"input":              stringProperty(),
+			"context":            stringProperty(),
+			"expectedOutput":     stringProperty(),
+			"expectedReferences": stringProperty(),
+			"output":             stringProperty(),
+			"model":              stringProperty(),
+			"evaluator":          evaluator,
+			"passRule":           map[string]any{"type": "string", "enum": []string{"reported", "threshold"}},
+			"operator":           map[string]any{"type": "string", "enum": []string{"gte", "lte"}},
+			"threshold":          map[string]any{"type": []string{"number", "null"}},
+		},
+		"required": []string{
+			"file", "collection", "filters", "caseId", "input", "context", "expectedOutput",
+			"expectedReferences", "output", "model", "evaluator", "passRule", "operator", "threshold",
+		},
+	}
+	dataset := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"file":           map[string]any{"type": "integer"},
+			"collection":     stringProperty(),
+			"caseId":         stringProperty(),
+			"input":          stringProperty(),
+			"reference":      stringProperty(),
+			"expectedOutput": stringProperty(),
+		},
+		"required": []string{"file", "collection", "caseId", "input", "reference", "expectedOutput"},
+	}
+	return map[string]any{
+		"type": "json_schema",
+		"json_schema": map[string]any{
+			"name":   "evaluation_mapping",
+			"strict": true,
+			"schema": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"version": map[string]any{"type": "integer", "const": 1},
+					"adapter": map[string]any{"type": "string", "const": "generic"},
+					"source":  lane,
+					"target":  lane,
+					"dataset": map[string]any{
+						"anyOf": []any{dataset, map[string]any{"type": "null"}},
+					},
+				},
+				"required": []string{"version", "adapter", "source", "target", "dataset"},
+			},
+		},
+	}
+}
 
 func (c *azureMappingProposer) Propose(ctx context.Context, input MappingProposalInput) (EvaluationMapping, error) {
 	if !azureOpenAIAccountName.MatchString(input.AccountName) || input.ModelName == "" || input.DeploymentName == "" {
@@ -138,7 +234,7 @@ func (c *azureMappingProposer) Propose(ctx context.Context, input MappingProposa
 			{"role": "system", "content": mappingProposalInstruction},
 			{"role": "user", "content": string(profile)},
 		},
-		"response_format":       map[string]string{"type": "json_object"},
+		"response_format":       mappingProposalResponseFormat(),
 		"max_completion_tokens": 4096,
 	})
 	if err != nil {
@@ -189,7 +285,7 @@ func (c *azureMappingProposer) Propose(ctx context.Context, input MappingProposa
 		(payload.Choices[0].FinishReason != "" && payload.Choices[0].FinishReason != "stop") {
 		return EvaluationMapping{}, errors.New("mapping model refused or returned an incomplete suggestion")
 	}
-	plan, err := decodeEvaluationMapping(payload.Choices[0].Message.Content)
+	plan, err := decodeMappingProposal(payload.Choices[0].Message.Content)
 	if err != nil {
 		return plan, err
 	}
@@ -203,6 +299,9 @@ func validateMappingProposal(plan EvaluationMapping, files []MappingSchemaFile) 
 	for _, lane := range []MappingLane{plan.Source, plan.Target} {
 		if lane.Threshold != nil || len(lane.Filters) != 0 || len(lane.Evaluator.Filters) != 0 {
 			return errors.New("schema-only proposals must leave filter values and thresholds unresolved")
+		}
+		if lane.RunID != "" || lane.LatencyMs != "" || lane.InputTokens != "" || lane.OutputTokens != "" {
+			return errors.New("schema-only proposals must leave operational metrics unmapped")
 		}
 		if lane.PassRule != "reported" && lane.PassRule != "threshold" {
 			return errors.New("AI proposal contains an invalid pass rule")
@@ -253,7 +352,11 @@ func validateMappingProposal(plan EvaluationMapping, files []MappingSchemaFile) 
 					}
 				}
 				if !found {
-					return errors.New("AI proposal references an unknown evaluator field")
+					return fmt.Errorf(
+						"AI proposal references unknown evaluator field %q under %q",
+						path,
+						lane.Evaluator.Collection,
+					)
 				}
 			}
 		}

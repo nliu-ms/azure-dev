@@ -689,7 +689,7 @@ func preserveMappedIdentity(dest *string, value, label, caseID string, preview *
 }
 
 func appendMappingPreviewCase(preview *MappingPreview, item evaluationCase, sourceScore, targetScore *float64) {
-	if len(preview.Cases) >= 20 {
+	if len(preview.Cases) >= 10 {
 		return
 	}
 	source, target, _ := qualityAssessment(item)

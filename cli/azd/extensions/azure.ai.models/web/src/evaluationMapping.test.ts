@@ -127,14 +127,16 @@ describe("local field profile", () => {
       collections: [{
         path: "",
         rowCount: 3,
-        fields: [{ path: "/sample.output_text", types: ["string"], present: 3, sample: "private answer" }],
+        fields: [{
+          path: "/sample.output_text", types: ["string"], present: 3, distinct: 3, sample: "private answer",
+        }],
       }],
     }],
     mapping,
     warnings: ["private sample warning"],
   };
 
-  it("shows a structural AI payload without filenames, samples, digests or rules", () => {
+  it("shows a structural AI payload with counts but without filenames, samples, digests or rules", () => {
     const payload = mappingSchemaPayload(profile);
     const text = JSON.stringify(payload);
     expect(text).toContain("/sample.output_text");
@@ -142,7 +144,8 @@ describe("local field profile", () => {
     expect(text).not.toContain("confidential");
     expect(text).not.toContain("mapping");
     expect(text).not.toContain("sample\":");
-    expect(text).not.toContain("rowCount");
+    expect(text).toContain("\"rowCount\":3");
+    expect(text).toContain("\"distinct\":3");
     expect(text).not.toContain("format");
     expect(payload.files[0].collections[0].id).toBe("collection:0");
   });

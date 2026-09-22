@@ -1047,9 +1047,6 @@ h1 {
 .target-model-picker select:focus-visible,
 .target-model-picker input:focus-visible { outline: 2px solid #0f6cbd; outline-offset: 2px; }
 .target-model-picker p { margin: 0; color: #637189; font-size: 12px; font-weight: 400; line-height: 1.6; }
-.custom-target-model summary { cursor: pointer; color: #40536c; font-size: 12px; }
-.custom-target-model form { display: grid; gap: 12px; margin: 14px 0; }
-.custom-target-model .fui-Button { justify-self: start; }
 .adapt-page { overflow: clip; }
 .adapt-step-panel[hidden] { display: none; }
 .adapt-optimization .evidence-section {
@@ -1118,6 +1115,106 @@ h1 {
 }
 .adapt-step-actions > span { margin-right: auto; color: #637189; font-size: 12px; }
 .adapt-step-actions > div { display: flex; gap: 10px; }
+
+.lifecycle-page { overflow: clip; }
+.lifecycle-page .hero h1 { max-width: 980px; }
+.lifecycle-card {
+  display: grid;
+  gap: 20px;
+  padding: 24px;
+  margin-bottom: 22px;
+  border: 1px solid #cbd9e8;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 16px 42px rgba(31, 50, 78, 0.06);
+}
+.lifecycle-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+.lifecycle-heading h2 { margin: 6px 0; color: #172033; font-size: 21px; }
+.lifecycle-heading p { max-width: 840px; margin: 0; color: #52627a; line-height: 1.6; }
+.validation-upload {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  border: 1px dashed #a8bfd7;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+.validation-upload > div { display: grid; gap: 5px; min-width: 0; }
+.validation-upload strong { overflow-wrap: anywhere; color: #26364f; }
+.validation-upload span { color: #637189; font-size: 12px; }
+.validation-counts,
+.retire-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+.validation-count,
+.retire-metrics article {
+  display: grid;
+  gap: 7px;
+  padding: 14px;
+  border: 1px solid #dde5ee;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+.validation-count span,
+.retire-metrics span { color: #637189; font-size: 11px; }
+.validation-count strong,
+.retire-metrics strong { color: #26364f; font-size: 22px; }
+.validation-count.success { border-color: #a9d1bb; background: #f2faf5; }
+.validation-count.warning { border-color: #ebd19d; background: #fffaf0; }
+.validation-count.danger { border-color: #efb5b2; background: #fff5f4; }
+.validation-gate {
+  display: grid;
+  gap: 6px;
+  padding: 15px 17px;
+  border-left: 4px solid #c56d19;
+  border-radius: 8px;
+  color: #52627a;
+  background: #fff8ef;
+  line-height: 1.5;
+}
+.validation-gate.ready { border-color: #218658; background: #eff9f3; }
+.validation-gate strong { color: #26364f; }
+.lifecycle-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 24px;
+}
+.rollout-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.rollout-grid article {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  border-radius: 10px;
+  background: #f4f7fb;
+}
+.rollout-grid span { color: #637189; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+.rollout-grid strong { color: #26364f; overflow-wrap: anywhere; }
+.rollout-grid small { color: #637189; }
+.rollout-checklist { margin: 0; padding-left: 24px; color: #40536c; line-height: 1.7; }
+.retire-query { display: flex; align-items: end; gap: 12px; }
+.retire-query label { display: grid; gap: 7px; color: #40536c; font-size: 12px; }
+.retire-query select {
+  min-width: 180px;
+  height: 36px;
+  padding: 6px 10px;
+  border: 1px solid #b9c8d8;
+  border-radius: 6px;
+  background: #fff;
+}
 
 .evidence-grid {
   display: grid;
@@ -2497,6 +2594,12 @@ footer {
   .adapt-step-nav { grid-template-columns: 1fr; }
   .adapt-step-actions { flex-wrap: wrap; padding: 12px; bottom: 8px; }
   .adapt-step-actions > div { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+  .lifecycle-heading,
+  .validation-upload { align-items: stretch; grid-template-columns: 1fr; flex-direction: column; }
+  .validation-counts,
+  .retire-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rollout-grid { grid-template-columns: 1fr; }
+  .retire-query { align-items: stretch; flex-direction: column; }
   .detail-panel-heading {
     flex-direction: column;
   }

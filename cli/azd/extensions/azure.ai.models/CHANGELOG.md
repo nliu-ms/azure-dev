@@ -1,7 +1,21 @@
 # Release History
 
 
-## 0.0.7-preview (Unreleased)
+## 0.0.8-preview (Unreleased)
+
+### Features
+
+- Added automatic schema-only AI mapping for JSON, JSONL, CSV, and XLSX evaluation exports. Suggestions use
+  strict structured output, stable-key cardinality metadata, full-data preview, and explicit user review
+  without sending raw records, prompts, outputs, filenames, hashes, or sample values
+- Added selectable migration Target models and a guided Adapt flow for Azure Monitor, evaluation evidence,
+  and PromptV2 optimization with exact request preview and separate customer-content consent
+- Added Validate for comparing an adapted Target rerun with the confirmed baseline, Roll out as a
+  customer-owned checklist, and a read-only Retire review based on Source deployment usage
+- Added original-schema mapping for split dataset/Source/Target evidence, strict stale-result guards, and
+  a bounded 10-case display sample while validating every imported record
+
+## 0.0.7-preview
 
 ### Features
 

@@ -246,6 +246,7 @@ func mappingValueType(value any) string {
 
 func profileMappingFields(rows []map[string]any) ([]MappingField, error) {
 	fields := map[string]*MappingField{}
+	distinct := map[string]map[[sha256.Size]byte]struct{}{}
 	var visit func(any, string) error
 	visit = func(value any, path string) error {
 		if path != "" {
@@ -262,6 +263,12 @@ func profileMappingFields(rows []map[string]any) ([]MappingField, error) {
 			if !slices.Contains(field.Types, kind) {
 				field.Types = append(field.Types, kind)
 				slices.Sort(field.Types)
+			}
+			if text, scalar := mappingScalar(value); scalar {
+				if distinct[path] == nil {
+					distinct[path] = map[[sha256.Size]byte]struct{}{}
+				}
+				distinct[path][sha256.Sum256([]byte(kind+"\x00"+text))] = struct{}{}
 			}
 			if field.Sample == "" && value != nil && kind != "array" && kind != "object" {
 				field.Sample = localMappingSample(valueString(value), 160)
@@ -290,6 +297,7 @@ func profileMappingFields(rows []map[string]any) ([]MappingField, error) {
 	}
 	result := make([]MappingField, 0, len(fields))
 	for _, path := range slices.Sorted(maps.Keys(fields)) {
+		fields[path].Distinct = len(distinct[path])
 		result = append(result, *fields[path])
 	}
 	return result, nil

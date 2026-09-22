@@ -23,6 +23,7 @@ func TestMappingProposerOnlySendsStructure(t *testing.T) {
 		 "oldOK":true,"newOK":false,"reason":"PRIVATE_REASON"}]`)}
 	files[0].profile.Collections[0].Path = "/PRIVATE_COLLECTION_NAME"
 	plan := mappingTestProposal()
+	proposalJSON := strings.TrimSuffix(valueStringJSON(plan), "}") + `,"runId":""}`
 	var received string
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
@@ -32,16 +33,26 @@ func TestMappingProposerOnlySendsStructure(t *testing.T) {
 		received = string(content)
 		require.NotContains(t, received, "PRIVATE_")
 		require.NotContains(t, received, files[0].profile.SHA256)
-		require.NotContains(t, received, "rowCount")
 		require.NotContains(t, received, `"format"`)
 		var payload map[string]any
 		require.NoError(t, json.Unmarshal(content, &payload))
 		require.Equal(t, "deployment", payload["model"])
-		require.Equal(t, map[string]any{"type": "json_object"}, payload["response_format"])
+		messages, ok := payload["messages"].([]any)
+		require.True(t, ok)
+		require.Len(t, messages, 2)
+		userMessage, ok := messages[1].(map[string]any)
+		require.True(t, ok)
+		userContent, ok := userMessage["content"].(string)
+		require.True(t, ok)
+		require.Contains(t, userContent, `"rowCount":1`)
+		require.Contains(t, userContent, `"distinct":1`)
+		responseFormat, ok := payload["response_format"].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, "json_schema", responseFormat["type"])
 		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 			"choices": []any{map[string]any{
 				"finish_reason": "stop",
-				"message":       map[string]string{"content": valueStringJSON(plan)},
+				"message":       map[string]string{"content": proposalJSON},
 			}},
 		}))
 	}))
@@ -118,6 +129,7 @@ func TestMappingProposerFailures(t *testing.T) {
 		{"invented value", func(plan *EvaluationMapping) {
 			plan.Target.Filters = []MappingFilter{{Path: "/id", Value: "guessed"}}
 		}},
+		{"operational metric", func(plan *EvaluationMapping) { plan.Target.LatencyMs = "/latency" }},
 		{"unknown file", func(plan *EvaluationMapping) { plan.Target.File = 3 }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -140,7 +152,7 @@ func (p *recordingMappingProposer) Propose(_ context.Context, input MappingPropo
 	return mappingTestProposal(), p.err
 }
 
-func TestMappingProposalHTTPConsentAndManualFallback(t *testing.T) {
+func TestMappingProposalHTTPAuthenticationAndManualFallback(t *testing.T) {
 	files := []mappingFile{mappingTestFile(t, 0, "PRIVATE_FILENAME.json", `[
 		{"id":"PRIVATE_CASE","question":"PRIVATE_INPUT","old":"A","new":"B","oldOK":true,"newOK":false}]`)}
 	proposer := &recordingMappingProposer{}
@@ -153,12 +165,6 @@ func TestMappingProposalHTTPConsentAndManualFallback(t *testing.T) {
 	server.authorize(server.handleMappingRequest)(response, request)
 	require.Equal(t, http.StatusUnauthorized, response.Code)
 	require.Zero(t, proposer.calls)
-	request = mappingTestRequest(t, "/api/evaluation-mapping/propose", files, mappingTestPlan(), fields)
-	response = httptest.NewRecorder()
-	server.handleMappingRequest(response, request)
-	require.Equal(t, http.StatusBadRequest, response.Code)
-	require.Zero(t, proposer.calls)
-	fields["allowAI"] = "true"
 	request = mappingTestRequest(t, "/api/evaluation-mapping/propose", files, mappingTestPlan(), fields)
 	response = httptest.NewRecorder()
 	server.handleMappingRequest(response, request)
