@@ -19,6 +19,18 @@ if (-not (Test-Path -Path $OUTPUT_DIR)) {
     New-Item -ItemType Directory -Path $OUTPUT_DIR | Out-Null
 }
 
+# Build the embedded migration Web UI.
+npm --prefix (Join-Path $EXTENSION_DIR "web") ci
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Failed to install migration Web UI dependencies"
+    exit 1
+}
+npm --prefix (Join-Path $EXTENSION_DIR "web") run build
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Failed to build migration Web UI"
+    exit 1
+}
+
 # Get Git commit hash and build date
 $COMMIT = git rev-parse HEAD
 if ($LASTEXITCODE -ne 0) {

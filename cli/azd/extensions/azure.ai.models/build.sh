@@ -15,6 +15,16 @@ OUTPUT_DIR="${OUTPUT_DIR:-$EXTENSION_DIR/bin}"
 # Create output and target directories if they don't exist
 mkdir -p "$OUTPUT_DIR"
 
+# Build the embedded migration Web UI.
+if ! npm --prefix "$EXTENSION_DIR/web" ci; then
+    echo "Failed to install migration Web UI dependencies"
+    exit 1
+fi
+if ! npm --prefix "$EXTENSION_DIR/web" run build; then
+    echo "Failed to build migration Web UI"
+    exit 1
+fi
+
 # Get Git commit hash and build date
 COMMIT=$(git rev-parse HEAD)
 BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)

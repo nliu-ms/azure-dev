@@ -9,6 +9,18 @@ param(
 
 $PSNativeCommandArgumentPassing = 'Legacy'
 
+# Rebuild the embedded migration Web UI so release binaries cannot contain stale assets.
+npm --prefix (Join-Path $PSScriptRoot "web") ci
+if ($LASTEXITCODE) {
+    Write-Host "Error installing migration Web UI dependencies"
+    exit $LASTEXITCODE
+}
+npm --prefix (Join-Path $PSScriptRoot "web") run build
+if ($LASTEXITCODE) {
+    Write-Host "Error building migration Web UI"
+    exit $LASTEXITCODE
+}
+
 # Remove any previously built binaries
 go clean
 

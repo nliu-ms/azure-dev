@@ -1,10 +1,54 @@
 # Release History
 
 
-## 0.0.7-preview (Unreleased)
+## 0.0.8-preview (Unreleased)
 
 ### Features
 
+- Added automatic schema-only AI mapping for JSON, JSONL, CSV, and XLSX evaluation exports. Suggestions use
+  strict structured output, stable-key cardinality metadata, full-data preview, and explicit user review
+  without sending raw records, prompts, outputs, filenames, hashes, or sample values
+- Added selectable migration Target models and a guided Adapt flow for Azure Monitor, evaluation evidence,
+  and PromptV2 optimization with exact request preview and separate customer-content consent
+- Added Validate for comparing an adapted Target rerun with the confirmed baseline, Roll out as a
+  customer-owned checklist, and a read-only Retire review based on Source deployment usage
+- Added original-schema mapping for split dataset/Source/Target evidence, strict stale-result guards, and
+  a bounded 10-case display sample while validating every imported record
+
+## 0.0.7-preview
+
+### Features
+
+- Added `azd ai models migrate`, which opens a local React experience for reviewing deployed model versions,
+  lifecycle status, and retirement dates across Azure OpenAI and Foundry resources in a subscription
+- Added a six-stage migration workflow. Discover compares the source deployment with an explicitly labeled
+  GPT-5.4 default target, while Assess finds existing GPT-5.4 deployments, lets users choose an existing or
+  new deployment path, and shows target lifecycle and capabilities from Azure management APIs
+- Improved large-subscription discovery with bounded parallel account scans, per-account and overall
+  timeouts, partial-result warnings, and an explicit browser timeout instead of an indefinite loading state
+- Changed deployment discovery to load Azure AI resources first and scan each resource independently, so
+  completed deployments appear immediately while pending or failed resources remain as compact table rows
+  instead of producing a page of warning banners
+- Fixed a blank page during progressive discovery when an Azure AI resource returned no deployments;
+  empty model collections now remain JSON arrays and the browser safely handles nullable responses
+- Simplified new deployment to one action; selecting it now hides existing deployments and lets users choose
+  a region and SKU while checking current model capacity and quota signals from Azure management APIs
+- Fixed regional SKU discovery to use the subscription model catalog for the selected region instead of the
+  source resource catalog; online Data Zone and regional deployment types now appear when supported
+- Added the Adapt step with inherited Source/Target deployments, Source Prompt and evaluation-result uploads,
+  and local XLSX/JSON/JSONL regression analysis. The report compares evaluator pass rates, groups
+  customer-provided failure evidence, identifies quality and operational regressions, and shows case-level
+  evidence. Prompt-fixable regressions can now be sent to PromptV2 with Azure identity authentication to generate
+  an adapted prompt, review a line-level diff and change rationale, and download the candidate for validation.
+  PromptV2 uses `gpt-5.2` as a temporary compatibility target when the selected migration model is newer than the
+  optimizer's supported target enum; the migration target and deployment remain unchanged and the result is labeled
+  non-target-specific.
+  Live Azure Monitor data remains an independent enrichment over a selected UTC window, with Source/Target summary
+  metrics and time-series charts for TTFT, TBT, TTLT, Input/Output tokens, and request rate
+- Adapt now inherits and displays the Source/Target pair fixed in Discover and Assess instead of asking users
+  to select the same deployments again
+- Labeled `OpenAI` resources as Azure OpenAI resources and `AIServices` resources as Foundry resources;
+  Foundry Projects are not used as deployment ownership or inventory boundaries
 - Added LoRA adapter support to `create` command with `--lora-rank`, `--lora-alpha`, `--lora-target-modules`, and `--lora-dropout` flags for registering LoRA adapters (`--weight-type LoRA`)
 - `show` command now displays LoRA Configuration section (rank, alpha, target modules, dropout) for LoRA adapters
 - `list` command now shows Weight Type column to distinguish FullWeight and LoRA models

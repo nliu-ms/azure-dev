@@ -47,6 +47,7 @@ func NewRootCommand() *cobra.Command {
 	rootCmd.AddCommand(newMetadataCommand())
 	rootCmd.AddCommand(newInitCommand())
 	rootCmd.AddCommand(newCustomCommand())
+	rootCmd.AddCommand(newMigrateCommand())
 
 	// Top-level aliases for custom model commands (preferred over "custom" subgroup)
 	for _, cmd := range newTopLevelCustomCommands() {
