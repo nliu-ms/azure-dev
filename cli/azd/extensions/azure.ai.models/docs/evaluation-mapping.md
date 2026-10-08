@@ -138,31 +138,24 @@ deltas. It does not promote imported text or heuristic failure labels into
 trusted rewrite directives. Legacy analysis fields may remain in API responses
 for compatibility, but do not determine this action's eligibility or steering.
 
-Before any model call, `POST /api/prompt-optimization-preview` receives the same
-authenticated multipart inputs and optimizer configuration as optimization.
-It re-reads the evidence locally and returns the exact request object, counts,
-byte size, local size limit, prompt/evaluation hashes and a `requestSha256`
-binding the destination account and request content.
-
-`POST /api/prompt-optimization` requires two additional multipart values:
+`POST /api/prompt-optimization` re-reads the confirmed evidence, validates the
+mapping and model identities, constructs the complete PromptV2 request, enforces
+the local size limit, and then calls PromptV2. It requires one additional
+multipart value:
 
 | Field | Meaning |
 |---|---|
 | `allowEvaluationContent=true` | Explicit permission to send prompt/case content; independent from the automatic schema-only mapping request |
-| `optimizationRequestSha256` | The reviewed preview's `requestSha256`; recomputed server-side before sending |
-
-Changing evidence, mapping, prompt or optimizer destination requires a fresh
-preview and consent. The result echoes `optimizationRequestSha256`.
 
 The local outbound-request guard is **2 MiB of serialized JSON**, distinct from
-the upload limit and from any service token limit. Oversized previews report
-the full count and size with `withinLimit=false` and `request=null`; no partial
-request is sent. Provider context-limit/rate-limit errors remain visible rather
-than triggering hidden sampling.
+the upload limit and from any service token limit. Oversized requests fail before
+any content is sent; no cases are truncated, sampled or omitted. Provider
+context-limit/rate-limit errors remain visible rather than triggering hidden
+sampling.
 
-The preview and its consent do not claim that all findings can be fixed by a
-prompt. PromptV2 proposes a candidate, possibly unchanged. Customer reruns of
-the same evaluator and dataset are still required before claiming improvements
+Consent does not claim that all findings can be fixed by a prompt. PromptV2
+proposes a candidate, possibly unchanged. Customer reruns of the same evaluator
+and dataset are still required before claiming improvements.
 or promoting the prompt. The GPT-5.2 optimizer compatibility setting and
 non-target-specific response labeling remain unchanged.
 

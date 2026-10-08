@@ -371,9 +371,7 @@ func TestReviewedMappingHTTPConfirmationAndOptimization(t *testing.T) {
 		"optimizerAccountName": "account", "optimizerModelName": "model", "optimizerDeploymentName": "deployment",
 		"caseCount": "99999", "regressions": "99999",
 	}
-	optimizationPreview := previewMappedOptimization(t, server, files, plan, fields)
 	fields["allowEvaluationContent"] = "true"
-	fields["optimizationRequestSha256"] = optimizationPreview.RequestSHA256
 	for _, endpoint := range []string{"/api/evaluation-analysis", "/api/prompt-optimization"} {
 		t.Run(endpoint, func(t *testing.T) {
 			call := server.handleEvaluationAnalysis

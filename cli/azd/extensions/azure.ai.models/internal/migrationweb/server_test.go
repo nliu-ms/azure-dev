@@ -23,10 +23,6 @@ type staticProvider struct {
 	err               error
 }
 
-func (p staticProvider) ListDeployments(context.Context) (ModelList, error) {
-	return p.result, p.err
-}
-
 func (p staticProvider) ListResources(context.Context) (ModelResourceList, error) {
 	return ModelResourceList{
 		SubscriptionID: p.result.SubscriptionID,
@@ -63,7 +59,6 @@ func (p staticProvider) QueryDeploymentMetrics(
 func TestServerServesAssetsAndProtectsAPI(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	server, err := NewServer(ServerOptions{
-		SubscriptionID: "sub",
 		Provider: staticProvider{
 			result: ModelList{
 				SubscriptionID: "sub",
@@ -134,7 +129,7 @@ func TestServerServesAssetsAndProtectsAPI(t *testing.T) {
 		t.Fatalf("unexpected page response: status=%d body=%q", pageResponse.StatusCode, string(page))
 	}
 
-	unauthorized, err := http.Get(server.URL() + "/api/models")
+	unauthorized, err := http.Get(server.URL() + "/api/resources")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,25 +200,15 @@ func TestServerServesAssetsAndProtectsAPI(t *testing.T) {
 		)
 	}
 
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL()+"/api/models", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Authorization", "Bearer "+browserURL.Query().Get("token"))
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("unexpected API status: %d", response.StatusCode)
-	}
-	var payload ModelList
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		t.Fatal(err)
-	}
-	_ = response.Body.Close()
-	if len(payload.Models) != 1 || payload.Models[0].DeploymentName != "chat" {
-		t.Fatalf("unexpected API payload: %+v", payload)
+	for _, removedPath := range []string{"/api/health", "/api/models", "/api/prompt-optimization-preview"} {
+		response, err := http.Get(server.URL() + removedPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Fatalf("expected %s to return 404, got %d", removedPath, response.StatusCode)
+		}
 	}
 
 	recommendationRequest, err := http.NewRequestWithContext(

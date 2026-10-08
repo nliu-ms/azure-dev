@@ -82,9 +82,7 @@ func TestMappingCanonicalPromptBindingAcrossEndpoints(t *testing.T) {
 			fields["optimizerModelName"] = "model"
 			fields["optimizerDeploymentName"] = "deployment"
 			if test.valid {
-				optimizationPreview := previewMappedOptimization(t, server, files, plan, fields)
 				fields["allowEvaluationContent"] = "true"
-				fields["optimizationRequestSha256"] = optimizationPreview.RequestSHA256
 			}
 			for _, endpoint := range []struct {
 				path string

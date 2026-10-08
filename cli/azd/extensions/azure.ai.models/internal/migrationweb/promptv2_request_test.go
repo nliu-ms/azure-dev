@@ -16,20 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func previewMappedOptimization(
-	t *testing.T, server *Server, files []mappingFile, plan EvaluationMapping, fields map[string]string,
-) PromptOptimizationPreview {
-	t.Helper()
-	response := httptest.NewRecorder()
-	server.handlePromptOptimizationPreview(response,
-		mappingTestRequest(t, "/api/prompt-optimization-preview", files, plan, fields))
-	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
-	var preview PromptOptimizationPreview
-	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &preview))
-	require.NotNil(t, preview.Warnings)
-	return preview
-}
-
 func optimizationTestInput(t *testing.T, analysis EvaluationAnalysis) PromptOptimizationInput {
 	t.Helper()
 	input, err := buildPromptOptimizationInput("Preserve business intent.", "source",
@@ -106,9 +92,8 @@ func TestOptimizationAllowsGeneralImprovement(t *testing.T) {
 	require.Contains(t, input.RequestedChanges, "general_prompt_improvement_not_regression_repair")
 	require.Empty(t, decodeOptimizationEvidence(t, input))
 	require.NotNil(t, input.VerificationCaseIDs)
-	wire, body, digest, err := preparePromptV2Request(input)
+	wire, body, err := preparePromptV2Request(input)
 	require.NoError(t, err)
-	require.NotEmpty(t, digest)
 	require.NotNil(t, wire.Messages)
 	require.NotNil(t, wire.Tools)
 	require.Contains(t, string(body), `"messages":[]`)
@@ -148,7 +133,7 @@ func refreshOptimizationMapping(t *testing.T, files []mappingFile, plan Evaluati
 	fields["evaluationSha256"] = preview.EvaluationSHA256
 }
 
-func TestOptimizationPreviewConsentDigestAndExactProviderBody(t *testing.T) {
+func TestOptimizationConsentAndExactProviderBody(t *testing.T) {
 	files, plan, fields := optimizationMappedFixture(t)
 	calls := 0
 	var received []byte
@@ -164,73 +149,22 @@ func TestOptimizationPreviewConsentDigestAndExactProviderBody(t *testing.T) {
 		credential: staticTokenCredential{}, httpClient: provider.Client(),
 		endpointForAccount: func(string) string { return provider.URL },
 	}}
-	preview := previewMappedOptimization(t, server, files, plan, fields)
-	require.Zero(t, calls)
-	require.True(t, preview.WithinLimit)
-	require.Equal(t, 3, preview.CaseCount)
-	require.Equal(t, 1, preview.RegressionCount)
-	require.Equal(t, 1, preview.ResidualFailureCount)
-	require.Equal(t, 1, preview.OperationalCount)
-	require.Equal(t, maxPromptV2RequestBytes, preview.MaxRequestBytes)
-	expectedBody, err := json.Marshal(preview.Request)
-	require.NoError(t, err)
-	require.Equal(t, len(expectedBody), preview.RequestBytes)
-	require.NotContains(t, string(expectedBody), "test-token")
-	fields["optimizationRequestSha256"] = preview.RequestSHA256
 	queryConsent := mappingTestRequest(t, "/api/prompt-optimization?allowEvaluationContent=true", files, plan, fields)
 	queryResponse := httptest.NewRecorder()
 	server.handlePromptOptimization(queryResponse, queryConsent)
 	require.Equal(t, http.StatusBadRequest, queryResponse.Code, "consent must be an explicit multipart field")
 	require.Zero(t, calls)
-	for _, test := range []struct {
-		name, field, value string
-		status             int
-	}{
-		{"missing consent", "allowEvaluationContent", "", http.StatusBadRequest},
-		{"false consent", "allowEvaluationContent", "false", http.StatusBadRequest},
-		{"missing digest", "optimizationRequestSha256", "", http.StatusConflict},
-		{"stale digest", "optimizationRequestSha256", strings.Repeat("0", 64), http.StatusConflict},
-		{"account", "optimizerAccountName", "different-account", http.StatusConflict},
-		{"deployment", "optimizerDeploymentName", "different-deployment", http.StatusConflict},
-		{"model", "optimizerModelName", "different-model", http.StatusConflict},
-		{"prompt", "promptContent", "different-prompt", http.StatusConflict},
+	for _, test := range []struct{ name, value string }{
+		{"missing consent", ""},
+		{"false consent", "false"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			changed := maps.Clone(fields)
-			if test.status == http.StatusConflict {
-				changed["allowEvaluationContent"] = "true"
-			}
-			changed[test.field] = test.value
-			if test.field == "promptContent" {
-				refreshOptimizationMapping(t, files, plan, changed)
-			}
+			changed["allowEvaluationContent"] = test.value
 			response := httptest.NewRecorder()
 			server.handlePromptOptimization(response,
 				mappingTestRequest(t, "/api/prompt-optimization", files, plan, changed))
-			require.Equal(t, test.status, response.Code, response.Body.String())
-			require.Zero(t, calls)
-		})
-	}
-	for _, change := range []string{"mapping", "file"} {
-		t.Run(change, func(t *testing.T) {
-			changedPlan := plan
-			changedFiles := append([]mappingFile{}, files...)
-			if change == "mapping" {
-				changedPlan.Source.Operator = "lte"
-			} else {
-				changedFiles[0] = mappingTestFile(t, 0, "evaluation.json",
-					strings.ReplaceAll(string(files[0].content), `"new":"B"`, `"new":"changed"`))
-			}
-			mappingPreview, _ := previewMapping(changedFiles, changedPlan, "source", "target")
-			require.True(t, mappingPreview.Valid)
-			changedFields := maps.Clone(fields)
-			changedFields["evaluationSha256"] = mappingPreview.EvaluationSHA256
-			changedFields["allowEvaluationContent"] = "true"
-			refreshOptimizationMapping(t, changedFiles, changedPlan, changedFields)
-			response := httptest.NewRecorder()
-			server.handlePromptOptimization(response,
-				mappingTestRequest(t, "/api/prompt-optimization", changedFiles, changedPlan, changedFields))
-			require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
+			require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
 			require.Zero(t, calls)
 		})
 	}
@@ -239,12 +173,18 @@ func TestOptimizationPreviewConsentDigestAndExactProviderBody(t *testing.T) {
 	server.handlePromptOptimization(response, mappingTestRequest(t, "/api/prompt-optimization", files, plan, fields))
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	require.Equal(t, 1, calls)
-	require.Equal(t, expectedBody, received)
+	require.NotContains(t, string(received), "test-token")
+	var wire PromptV2WireRequest
+	require.NoError(t, json.Unmarshal(received, &wire))
+	require.Equal(t, "gpt-5.2", wire.ModelName)
+	require.Equal(t, "deployment", wire.ModelDeploymentName)
+	require.Contains(t, wire.RequestedChanges, `"caseId":"regression"`)
+	require.Contains(t, wire.RequestedChanges, `"caseId":"residual"`)
+	require.Contains(t, wire.RequestedChanges, `"caseId":"operation"`)
 	var result PromptOptimizationResult
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
-	require.Equal(t, preview.RequestSHA256, result.OptimizationRequestSHA256)
-	require.Equal(t, preview.PromptSHA256, result.PromptSHA256)
-	require.Equal(t, preview.EvaluationSHA256, result.EvaluationSHA256)
+	require.NotEmpty(t, result.PromptSHA256)
+	require.NotEmpty(t, result.EvaluationSHA256)
 	require.False(t, result.TargetSpecific)
 	require.NotNil(t, result.Comments)
 }
@@ -262,15 +202,7 @@ func TestOptimizationOverflowNeverSendsPartialRequest(t *testing.T) {
 	refreshOptimizationMapping(t, files, plan, fields)
 	optimizer := &recordingPromptOptimizer{}
 	server := &Server{promptOptimizer: optimizer}
-	preview := previewMappedOptimization(t, server, files, plan, fields)
-	require.False(t, preview.WithinLimit)
-	require.Nil(t, preview.Request)
-	require.Greater(t, preview.RequestBytes, maxPromptV2RequestBytes)
-	require.Equal(t, 3, preview.CaseCount)
-	require.NotEmpty(t, preview.RequestSHA256)
-	require.Contains(t, strings.Join(preview.Warnings, "\n"), "no cases were truncated, sampled or omitted")
 	fields["allowEvaluationContent"] = "true"
-	fields["optimizationRequestSha256"] = preview.RequestSHA256
 	response := httptest.NewRecorder()
 	server.handlePromptOptimization(response, mappingTestRequest(t, "/api/prompt-optimization", files, plan, fields))
 	require.Equal(t, http.StatusRequestEntityTooLarge, response.Code, response.Body.String())
@@ -283,32 +215,35 @@ func TestOptimizationOverflowNeverSendsPartialRequest(t *testing.T) {
 	require.ErrorContains(t, err, "local")
 }
 
-func TestOptimizationPreviewAndOptimizeValidateConfiguration(t *testing.T) {
+func TestOptimizationValidatesConfiguration(t *testing.T) {
 	files, plan, fields := optimizationMappedFixture(t)
 	for _, test := range []struct{ field, value string }{
 		{"optimizerAccountName", "https://not-an-account"}, {"optimizerModelName", ""},
 		{"optimizerDeploymentName", "\n"}, {"promptContent", ""},
 		{"promptContent", strings.Repeat("x", maxPromptBytes+1)},
 	} {
-		for _, preview := range []bool{true, false} {
-			changed := maps.Clone(fields)
-			changed[test.field] = test.value
-			server := &Server{promptOptimizer: &recordingPromptOptimizer{}}
-			response := httptest.NewRecorder()
-			server.handlePromptOptimizationRequest(response,
-				mappingTestRequest(t, "/api/prompt-optimization", files, plan, changed), preview)
-			require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
-		}
+		changed := maps.Clone(fields)
+		changed[test.field] = test.value
+		changed["allowEvaluationContent"] = "true"
+		server := &Server{promptOptimizer: &recordingPromptOptimizer{}}
+		response := httptest.NewRecorder()
+		server.handlePromptOptimization(response,
+			mappingTestRequest(t, "/api/prompt-optimization", files, plan, changed))
+		require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
 	}
 }
 
-func TestOptimizationPreviewRequiresSessionAuthentication(t *testing.T) {
-	server, err := NewServer(ServerOptions{Provider: staticProvider{}})
+func TestOptimizationRequiresSessionAuthentication(t *testing.T) {
+	server, err := NewServer(ServerOptions{
+		Provider:        staticProvider{},
+		PromptOptimizer: &recordingPromptOptimizer{},
+	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, server.listener.Close()) })
 	files, plan, fields := optimizationMappedFixture(t)
+	fields["allowEvaluationContent"] = "true"
 	for _, token := range []string{"", "wrong", server.token} {
-		request := mappingTestRequest(t, "/api/prompt-optimization-preview", files, plan, fields)
+		request := mappingTestRequest(t, "/api/prompt-optimization", files, plan, fields)
 		request.Header.Set("Authorization", "Bearer "+token)
 		response := httptest.NewRecorder()
 		server.httpServer.Handler.ServeHTTP(response, request)
@@ -322,14 +257,14 @@ func TestOptimizationPreviewRequiresSessionAuthentication(t *testing.T) {
 
 func TestPromptV2LimitMeasuresExactEscapedBody(t *testing.T) {
 	input := optimizationTestInput(t, EvaluationAnalysis{})
-	_, initial, _, err := preparePromptV2Request(input)
+	_, initial, err := preparePromptV2Request(input)
 	require.NoError(t, err)
 	input.RequestedChanges += strings.Repeat("x", maxPromptV2RequestBytes-len(initial))
-	_, exact, _, err := preparePromptV2Request(input)
+	_, exact, err := preparePromptV2Request(input)
 	require.NoError(t, err)
 	require.Len(t, exact, maxPromptV2RequestBytes)
 	input.RequestedChanges += "<"
-	_, oversized, _, err := preparePromptV2Request(input)
+	_, oversized, err := preparePromptV2Request(input)
 	require.NoError(t, err)
 	require.Len(t, oversized, maxPromptV2RequestBytes+6, "HTML escaping counts toward the outbound byte limit")
 	_, err = (&promptV2Client{}).Optimize(t.Context(), input)
@@ -343,12 +278,11 @@ func TestOptimizationWithNoFailuresEndToEnd(t *testing.T) {
 	plan.Source.LatencyMs, plan.Target.LatencyMs = "", ""
 	refreshOptimizationMapping(t, files, plan, fields)
 	server := &Server{promptOptimizer: &recordingPromptOptimizer{}}
-	preview := previewMappedOptimization(t, server, files, plan, fields)
-	require.Zero(t, preview.CaseCount)
-	require.Contains(t, preview.Request.RequestedChanges, "general_prompt_improvement_not_regression_repair")
-	fields["optimizationRequestSha256"], fields["allowEvaluationContent"] = preview.RequestSHA256, "true"
+	fields["allowEvaluationContent"] = "true"
 	response := httptest.NewRecorder()
 	server.handlePromptOptimization(response, mappingTestRequest(t, "/api/prompt-optimization", files, plan, fields))
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	require.Contains(t, response.Body.String(), `"verificationCaseIds":[]`)
+	require.Contains(t, server.promptOptimizer.(*recordingPromptOptimizer).input.RequestedChanges,
+		"general_prompt_improvement_not_regression_repair")
 }

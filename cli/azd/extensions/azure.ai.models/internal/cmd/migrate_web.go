@@ -58,7 +58,6 @@ func runMigrateWeb(
 
 	server, err := migrationweb.NewServer(migrationweb.ServerOptions{
 		Port:            flags.Port,
-		SubscriptionID:  subscriptionID,
 		Provider:        provider,
 		PromptOptimizer: promptOptimizer,
 		MappingProposer: mappingProposer,

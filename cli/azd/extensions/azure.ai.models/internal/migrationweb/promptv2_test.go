@@ -308,25 +308,14 @@ func TestPromptOptimizationHandlerReanalyzesEvaluation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	previewRequest := httptest.NewRequest(http.MethodPost, "/api/prompt-optimization-preview",
-		bytes.NewReader(body.Bytes()))
-	previewRequest.Header.Set("Content-Type", writer.FormDataContentType())
-	previewResponse := httptest.NewRecorder()
 	server := &Server{promptOptimizer: optimizer}
-	server.handlePromptOptimizationPreview(previewResponse, previewRequest)
-	var preview PromptOptimizationPreview
-	if err := json.Unmarshal(previewResponse.Body.Bytes(), &preview); err != nil || preview.RequestSHA256 == "" {
-		t.Fatalf("preview failed: %s: %v", previewResponse.Body.String(), err)
-	}
 	request := httptest.NewRequest(http.MethodPost, "/api/prompt-optimization", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	if err := request.ParseMultipartForm(maxEvaluationUploadBytes); err != nil {
 		t.Fatal(err)
 	}
 	request.MultipartForm.Value["allowEvaluationContent"] = []string{"true"}
-	request.MultipartForm.Value["optimizationRequestSha256"] = []string{preview.RequestSHA256}
 	request.Form.Set("allowEvaluationContent", "true")
-	request.Form.Set("optimizationRequestSha256", preview.RequestSHA256)
 	response := httptest.NewRecorder()
 	server.handlePromptOptimization(response, request)
 	if response.Code != http.StatusOK {
@@ -343,8 +332,7 @@ func TestPromptOptimizationHandlerReanalyzesEvaluation(t *testing.T) {
 		len(optimizer.input.VerificationCaseIDs) != 1 ||
 		optimizer.input.VerificationCaseIDs[0] != "case-1" ||
 		result.PromptSHA256 == "" ||
-		result.EvaluationSHA256 == "" ||
-		result.OptimizationRequestSHA256 != preview.RequestSHA256 {
+		result.EvaluationSHA256 == "" {
 		t.Fatalf("unexpected optimization response: input=%+v result=%+v", optimizer.input, result)
 	}
 }

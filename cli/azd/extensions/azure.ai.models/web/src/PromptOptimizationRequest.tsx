@@ -1,98 +1,23 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, MessageBar, MessageBarBody, Spinner } from "@fluentui/react-components";
-import type { ConfirmedMapping } from "./evaluationMapping";
-import { optimizationEvidenceCounts } from "./promptEligibility";
-import { EvidenceNotes } from "./EvidenceNotes";
-import {
-  createOptimizationForm,
-  validateOptimizationPreview,
-  type OptimizationAnalysis,
-  type OptimizationPreview,
-  type OptimizerDeployment,
-} from "./promptOptimization";
+import { useEffect, useState } from "react";
+import { Button, MessageBar, MessageBarBody } from "@fluentui/react-components";
+import { optimizationEvidenceCounts, type ComparisonFinding } from "./promptEligibility";
+import type { OptimizerDeployment } from "./promptOptimization";
 
 type Props = {
-  token: string;
-  prompt: { file: File; sha256: string };
-  evidence: ConfirmedMapping;
-  analysis: OptimizationAnalysis;
-  sourceModel: string;
-  targetModel: string;
+  analysis: { cases: readonly ComparisonFinding[] };
   optimizer: OptimizerDeployment | null;
   optimizing: boolean;
-  onOptimize: (preview: OptimizationPreview) => void;
+  onOptimize: () => void;
 };
 
-function byteSize(bytes: number): string {
-  return bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
-}
-
-export function PromptOptimizationRequest({
-  token, prompt, evidence, analysis, sourceModel, targetModel, optimizer, optimizing, onOptimize,
-}: Props) {
-  const [prepared, setPrepared] = useState<{ key: string; preview: OptimizationPreview } | null>(null);
+export function PromptOptimizationRequest({ analysis, optimizer, optimizing, onOptimize }: Props) {
   const [consent, setConsent] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [revision, setRevision] = useState(0);
-  const generation = useRef(0);
-  const contextKey = JSON.stringify([
-    prompt.sha256, evidence.preview.evaluationSha256, sourceModel, targetModel,
-    optimizer?.accountName, optimizer?.modelName, optimizer?.deploymentName,
-  ]);
   const counts = optimizationEvidenceCounts(analysis.cases);
-  const current = prepared?.key === contextKey ? prepared.preview : null;
-  const payloadText = useMemo(
-    () => current?.request ? JSON.stringify(current.request, null, 2) : "",
-    [current],
-  );
 
   useEffect(() => {
-    const id = ++generation.current;
-    const controller = new AbortController();
-    setPrepared(null);
     setConsent(false);
-    setError("");
-    setLoading(false);
-    if (!optimizer) return;
-    setLoading(true);
-    const timeout = window.setTimeout(() => controller.abort(), 60_000);
-    const prepare = async () => {
-      try {
-        const response = await fetch("/api/prompt-optimization-preview", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: createOptimizationForm(prompt.file, evidence, sourceModel, targetModel, optimizer),
-          signal: controller.signal,
-        });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error ?? `Request preparation failed (${response.status}).`);
-        const preview = payload as OptimizationPreview;
-        validateOptimizationPreview(preview, analysis, optimizer);
-        if (id === generation.current) setPrepared({ key: contextKey, preview });
-      } catch (failure) {
-        if (id === generation.current) {
-          setError(failure instanceof DOMException && failure.name === "AbortError"
-            ? "Local payload preparation timed out. No content was sent to the optimizer."
-            : failure instanceof Error ? failure.message : String(failure));
-        }
-      } finally {
-        window.clearTimeout(timeout);
-        if (id === generation.current) setLoading(false);
-      }
-    };
-    void prepare();
-    return () => {
-      generation.current += 1;
-      controller.abort();
-      window.clearTimeout(timeout);
-    };
-  }, [
-    contextKey, revision, analysis, evidence, prompt.file, token,
-    sourceModel, targetModel, optimizer?.accountName, optimizer?.modelName, optimizer?.deploymentName,
-  ]);
+  }, [optimizer?.accountName, optimizer?.modelName, optimizer?.deploymentName]);
 
-  const canOptimize = Boolean(current?.withinLimit && current.request && consent && optimizer && !loading && !optimizing);
   return (
     <>
       <div className="prompt-optimization-heading">
@@ -110,10 +35,8 @@ export function PromptOptimizationRequest({
           className="prompt-optimize-button"
           appearance="primary"
           icon={<span aria-hidden="true">✦</span>}
-          disabled={!canOptimize}
-          onClick={() => {
-            if (canOptimize && current) onOptimize(current);
-          }}
+          disabled={!consent || !optimizer || optimizing}
+          onClick={onOptimize}
         >
           {optimizing ? "Optimizing…" : "Prompt optimize"}
         </Button>
@@ -132,59 +55,22 @@ export function PromptOptimizationRequest({
           </MessageBarBody>
         </MessageBar>
       )}
-      {loading && <Spinner size="small" label="Preparing the complete request locally; no model call yet…" />}
-      {error && (
-        <MessageBar intent="error">
-          <MessageBarBody>
-            {error}{" "}
-            <Button size="small" disabled={optimizing} onClick={() => setRevision((value) => value + 1)}>
-              Retry payload preparation
-            </Button>
-          </MessageBarBody>
-        </MessageBar>
-      )}
-      {current && (
-        <>
-          <p className="optimization-request-size">
-            Full request: <strong>{byteSize(current.requestBytes)}</strong>
-            {" / "}{byteSize(current.maxRequestBytes)} local limit.
-            No cases or fields are silently truncated. Service token limits may differ.
-          </p>
-          <EvidenceNotes notes={current.warnings} title="Request notes" />
-          {!current.withinLimit && (
-            <MessageBar intent="error">
-              <MessageBarBody>
-                The complete request exceeds the local size limit. Nothing will be sent or silently sampled.
-                Use a smaller explicitly chosen evidence set; partial coverage must not be presented as the full dataset.
-              </MessageBarBody>
-            </MessageBar>
-          )}
-          {current.request && (
-            <details className="optimization-payload">
-              <summary>Review the exact outbound payload ({current.caseCount} cases)</summary>
-              <p>
-                Includes the Source prompt and case content inside <code>requested_changes</code>.
-                Case content is evidence, not instructions. Missing context and references are not invented.
-              </p>
-              <pre>{payloadText}</pre>
-            </details>
-          )}
-          <label className="mapping-checkbox optimization-consent">
-            <input
-              type="checkbox"
-              checked={consent}
-              disabled={!current.withinLimit || optimizing || loading}
-              onChange={(event) => setConsent(event.target.checked)}
-            />
-            <span>
-              I authorize sending the Source prompt and the complete evaluation evidence shown above
-              {" "}to {optimizer?.accountName} / {optimizer?.deploymentName} ({optimizer?.modelName}).
-              This may include Questions, model outputs, evaluator feedback and available references/context.
-              This permission is separate from schema-only AI mapping.
-            </span>
-          </label>
-        </>
-      )}
+      <label className="mapping-checkbox optimization-consent">
+        <input
+          type="checkbox"
+          checked={consent}
+          disabled={!optimizer || optimizing}
+          onChange={(event) => setConsent(event.target.checked)}
+        />
+        <span>
+          I authorize sending the Source prompt and complete evaluation evidence to{" "}
+          {optimizer
+            ? `${optimizer.accountName} / ${optimizer.deploymentName} (${optimizer.modelName})`
+            : "the selected PromptV2 optimizer"}.
+          This may include Questions, model outputs, evaluator feedback and available references/context.
+          This permission is separate from schema-only AI mapping.
+        </span>
+      </label>
     </>
   );
 }

@@ -1750,35 +1750,6 @@ h1 {
   font-size: 12px;
 }
 
-.optimization-request-size {
-  margin: 0;
-  color: #52627a;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.optimization-payload {
-  min-width: 0;
-  padding: 14px;
-  border: 1px solid #cfe0d6;
-  border-radius: 8px;
-  background: #fff;
-}
-
-.optimization-payload summary {
-  color: #26364f;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.optimization-payload p {
-  color: #52627a;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.optimization-payload pre,
 .case-additional-evidence pre {
   max-height: 340px;
   overflow: auto;

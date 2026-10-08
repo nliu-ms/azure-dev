@@ -6,7 +6,6 @@ package migrationweb
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,17 +64,16 @@ type PromptOptimizerPosition struct {
 
 // PromptOptimizationResult contains the PromptV2 candidate and its evidence traceability.
 type PromptOptimizationResult struct {
-	SourcePrompt              string                   `json:"sourcePrompt"`
-	OptimizedPrompt           string                   `json:"optimizedPrompt"`
-	RequestedChanges          string                   `json:"requestedChanges"`
-	Comments                  []PromptOptimizerComment `json:"comments"`
-	VerificationCaseIDs       []string                 `json:"verificationCaseIds"`
-	OptimizerModel            string                   `json:"optimizerModel"`
-	OptimizerDeployment       string                   `json:"optimizerDeployment"`
-	TargetSpecific            bool                     `json:"targetSpecific"`
-	PromptSHA256              string                   `json:"promptSha256"`
-	EvaluationSHA256          string                   `json:"evaluationSha256"`
-	OptimizationRequestSHA256 string                   `json:"optimizationRequestSha256"`
+	SourcePrompt        string                   `json:"sourcePrompt"`
+	OptimizedPrompt     string                   `json:"optimizedPrompt"`
+	RequestedChanges    string                   `json:"requestedChanges"`
+	Comments            []PromptOptimizerComment `json:"comments"`
+	VerificationCaseIDs []string                 `json:"verificationCaseIds"`
+	OptimizerModel      string                   `json:"optimizerModel"`
+	OptimizerDeployment string                   `json:"optimizerDeployment"`
+	TargetSpecific      bool                     `json:"targetSpecific"`
+	PromptSHA256        string                   `json:"promptSha256"`
+	EvaluationSHA256    string                   `json:"evaluationSha256"`
 }
 
 // PromptOptimizer generates an evidence-backed prompt candidate.
@@ -112,40 +110,24 @@ type PromptV2WireRequest struct {
 
 type promptV2Request = PromptV2WireRequest
 
-// PromptOptimizationPreview describes a locally prepared, complete request without contacting a model.
-type PromptOptimizationPreview struct {
-	PromptSHA256         string               `json:"promptSha256"`
-	EvaluationSHA256     string               `json:"evaluationSha256"`
-	RequestSHA256        string               `json:"requestSha256"`
-	CaseCount            int                  `json:"caseCount"`
-	RegressionCount      int                  `json:"regressionCount"`
-	ResidualFailureCount int                  `json:"residualFailureCount"`
-	OperationalCount     int                  `json:"operationalCount"`
-	RequestBytes         int                  `json:"requestBytes"`
-	MaxRequestBytes      int                  `json:"maxRequestBytes"`
-	WithinLimit          bool                 `json:"withinLimit"`
-	Request              *PromptV2WireRequest `json:"request"`
-	Warnings             []string             `json:"warnings"`
-}
-
-func preparePromptV2Request(input PromptOptimizationInput) (PromptV2WireRequest, []byte, string, error) {
+func preparePromptV2Request(input PromptOptimizationInput) (PromptV2WireRequest, []byte, error) {
 	if !azureOpenAIAccountName.MatchString(input.OptimizerAccount) {
-		return PromptV2WireRequest{}, nil, "", errors.New("optimizer Azure OpenAI account name is invalid")
+		return PromptV2WireRequest{}, nil, errors.New("optimizer Azure OpenAI account name is invalid")
 	}
 	for _, value := range []string{input.OptimizerModel, input.OptimizerDeployment} {
 		if strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n\x00") {
-			return PromptV2WireRequest{}, nil, "",
+			return PromptV2WireRequest{}, nil,
 				errors.New("optimizer model and deployment names are required and must be valid")
 		}
 	}
 	if strings.TrimSpace(input.SourcePrompt) == "" {
-		return PromptV2WireRequest{}, nil, "", errors.New("Source prompt is empty")
+		return PromptV2WireRequest{}, nil, errors.New("Source prompt is empty")
 	}
 	if len(input.SourcePrompt) > maxPromptBytes {
-		return PromptV2WireRequest{}, nil, "", fmt.Errorf("Source prompt exceeds the %d KB limit", maxPromptBytes/1024)
+		return PromptV2WireRequest{}, nil, fmt.Errorf("Source prompt exceeds the %d KB limit", maxPromptBytes/1024)
 	}
 	if strings.TrimSpace(input.RequestedChanges) == "" {
-		return PromptV2WireRequest{}, nil, "", errors.New("PromptV2 requires optimization task guidance and evaluation data")
+		return PromptV2WireRequest{}, nil, errors.New("PromptV2 requires optimization task guidance and evaluation data")
 	}
 	wire := PromptV2WireRequest{
 		DeveloperMessage: input.SourcePrompt, Messages: []any{}, Tools: []any{},
@@ -154,17 +136,9 @@ func preparePromptV2Request(input PromptOptimizationInput) (PromptV2WireRequest,
 	}
 	body, err := json.Marshal(wire)
 	if err != nil {
-		return wire, nil, "", fmt.Errorf("encode PromptV2 request: %w", err)
+		return wire, nil, fmt.Errorf("encode PromptV2 request: %w", err)
 	}
-	binding, err := json.Marshal(struct {
-		Account string          `json:"account"`
-		Body    json.RawMessage `json:"body"`
-	}{input.OptimizerAccount, body})
-	if err != nil {
-		return wire, nil, "", fmt.Errorf("encode PromptV2 destination binding: %w", err)
-	}
-	digest := sha256.Sum256(binding)
-	return wire, body, fmt.Sprintf("%x", digest), nil
+	return wire, body, nil
 }
 
 func promptV2SizeError(size int) error {
@@ -203,7 +177,7 @@ func (c *promptV2Client) Optimize(
 	ctx context.Context,
 	input PromptOptimizationInput,
 ) (PromptOptimizationResult, error) {
-	_, body, digest, err := preparePromptV2Request(input)
+	_, body, err := preparePromptV2Request(input)
 	if err != nil {
 		return PromptOptimizationResult{}, err
 	}
@@ -263,17 +237,16 @@ func (c *promptV2Client) Optimize(
 		payload.Comments = []PromptOptimizerComment{}
 	}
 	return PromptOptimizationResult{
-		SourcePrompt:              input.SourcePrompt,
-		OptimizedPrompt:           payload.NewDeveloperMessage,
-		RequestedChanges:          input.RequestedChanges,
-		Comments:                  payload.Comments,
-		VerificationCaseIDs:       input.VerificationCaseIDs,
-		OptimizerModel:            input.OptimizerModel,
-		OptimizerDeployment:       input.OptimizerDeployment,
-		TargetSpecific:            false,
-		PromptSHA256:              input.PromptSHA256,
-		EvaluationSHA256:          input.EvaluationSHA256,
-		OptimizationRequestSHA256: digest,
+		SourcePrompt:        input.SourcePrompt,
+		OptimizedPrompt:     payload.NewDeveloperMessage,
+		RequestedChanges:    input.RequestedChanges,
+		Comments:            payload.Comments,
+		VerificationCaseIDs: input.VerificationCaseIDs,
+		OptimizerModel:      input.OptimizerModel,
+		OptimizerDeployment: input.OptimizerDeployment,
+		TargetSpecific:      false,
+		PromptSHA256:        input.PromptSHA256,
+		EvaluationSHA256:    input.EvaluationSHA256,
 	}, nil
 }
 

@@ -26,7 +26,6 @@ import (
 
 type ServerOptions struct {
 	Port            int
-	SubscriptionID  string
 	Provider        ModelProvider
 	PromptOptimizer PromptOptimizer
 	MappingProposer MappingProposer
@@ -35,7 +34,6 @@ type ServerOptions struct {
 type Server struct {
 	listener        net.Listener
 	httpServer      *http.Server
-	subscriptionID  string
 	provider        ModelProvider
 	promptOptimizer PromptOptimizer
 	mappingProposer MappingProposer
@@ -63,7 +61,6 @@ func NewServer(options ServerOptions) (*Server, error) {
 
 	server := &Server{
 		listener:        listener,
-		subscriptionID:  options.SubscriptionID,
 		provider:        options.Provider,
 		promptOptimizer: options.PromptOptimizer,
 		mappingProposer: options.MappingProposer,
@@ -72,8 +69,6 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/resources", server.authorize(server.handleResources))
 	mux.HandleFunc("POST /api/resource-models", server.authorize(server.handleResourceModels))
-	mux.HandleFunc("GET /api/models", server.authorize(server.handleModels))
-	mux.HandleFunc("GET /api/health", server.authorize(server.handleHealth))
 	mux.HandleFunc("POST /api/recommendations", server.authorize(server.handleRecommendation))
 	mux.HandleFunc("POST /api/assessments", server.authorize(server.handleAssessment))
 	mux.HandleFunc("POST /api/deployment-options", server.authorize(server.handleDeploymentOptions))
@@ -81,10 +76,10 @@ func NewServer(options ServerOptions) (*Server, error) {
 	mux.HandleFunc("POST /api/evaluation-analysis", server.authorize(server.handleEvaluationAnalysis))
 	mux.HandleFunc("POST /api/evaluation-validation", server.authorize(server.handleEvaluationValidation))
 	mux.HandleFunc("POST /api/prompt-optimization", server.authorize(server.handlePromptOptimization))
-	mux.HandleFunc("POST /api/prompt-optimization-preview", server.authorize(server.handlePromptOptimizationPreview))
 	for _, action := range []string{"profile", "preview", "propose"} {
 		mux.HandleFunc("POST /api/evaluation-mapping/"+action, server.authorize(server.handleMappingRequest))
 	}
+	mux.HandleFunc("/api/", http.NotFound)
 	mux.Handle("/", assetHandler(assets()))
 	server.httpServer = &http.Server{
 		Handler:           mux,
@@ -196,30 +191,6 @@ func (s *Server) handleResourceModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), inventoryRequestTimeout)
-	defer cancel()
-	result, err := s.provider.ListDeployments(ctx)
-	if err != nil {
-		status := http.StatusBadGateway
-		message := fmt.Sprintf("Could not load Azure model deployments: %v", err)
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			status = http.StatusGatewayTimeout
-			message = "Azure model discovery timed out. Retry the scan or use a subscription with fewer AI resources."
-		}
-		writeJSON(w, status, map[string]string{"error": message})
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status":         "ready",
-		"subscriptionId": s.subscriptionID,
-	})
 }
 
 func (s *Server) handleRecommendation(w http.ResponseWriter, r *http.Request) {
@@ -410,15 +381,7 @@ func (s *Server) handleEvaluationAnalysis(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handlePromptOptimization(w http.ResponseWriter, r *http.Request) {
-	s.handlePromptOptimizationRequest(w, r, false)
-}
-
-func (s *Server) handlePromptOptimizationPreview(w http.ResponseWriter, r *http.Request) {
-	s.handlePromptOptimizationRequest(w, r, true)
-}
-
-func (s *Server) handlePromptOptimizationRequest(w http.ResponseWriter, r *http.Request, previewOnly bool) {
-	if !previewOnly && s.promptOptimizer == nil {
+	if s.promptOptimizer == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "PromptV2 is not configured for this migration session.",
 		})
@@ -433,6 +396,14 @@ func (s *Server) handlePromptOptimizationRequest(w http.ResponseWriter, r *http.
 	}
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
+	}
+	consent := r.MultipartForm.Value["allowEvaluationContent"]
+	if len(consent) != 1 || consent[0] != "true" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "Explicit allowEvaluationContent=true consent is required " +
+				"before sending evaluation content to PromptV2.",
+		})
+		return
 	}
 	_, prompt, err := readUploadedFile(r, "prompt")
 	if err != nil {
@@ -480,51 +451,12 @@ func (s *Server) handlePromptOptimizationRequest(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
-	wire, body, requestSHA256, err := preparePromptV2Request(input)
+	_, body, err := preparePromptV2Request(input)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	preview := PromptOptimizationPreview{
-		PromptSHA256: analysis.PromptSHA256, EvaluationSHA256: evaluationSHA256, RequestSHA256: requestSHA256,
-		CaseCount: len(input.VerificationCaseIDs), RequestBytes: len(body), MaxRequestBytes: maxPromptV2RequestBytes,
-		WithinLimit: len(body) <= maxPromptV2RequestBytes, Warnings: optimizationWarnings(analysis),
-	}
-	for _, item := range analysis.Cases {
-		switch item.Outcome {
-		case "regression":
-			preview.RegressionCount++
-		case "pre_existing_failure":
-			preview.ResidualFailureCount++
-		case "operational_regression":
-			preview.OperationalCount++
-		}
-	}
-	if preview.WithinLimit {
-		preview.Request = &wire
-	} else {
-		preview.Warnings = append(preview.Warnings, promptV2SizeError(len(body)).Error())
-	}
-	if previewOnly {
-		writeJSON(w, http.StatusOK, preview)
-		return
-	}
-	consent := r.MultipartForm.Value["allowEvaluationContent"]
-	if len(consent) != 1 || consent[0] != "true" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "Explicit allowEvaluationContent=true consent is required " +
-				"before sending evaluation content to PromptV2.",
-		})
-		return
-	}
-	supplied := r.MultipartForm.Value["optimizationRequestSha256"]
-	if len(supplied) != 1 || supplied[0] != requestSHA256 {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "The optimization request preview is missing or stale. Preview the current complete request again.",
-		})
-		return
-	}
-	if !preview.WithinLimit {
+	if len(body) > maxPromptV2RequestBytes {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": promptV2SizeError(len(body)).Error()})
 		return
 	}
@@ -555,7 +487,6 @@ func (s *Server) handlePromptOptimizationRequest(w http.ResponseWriter, r *http.
 	}
 	result.PromptSHA256 = fmt.Sprintf("%x", promptDigest)
 	result.EvaluationSHA256 = evaluationSHA256
-	result.OptimizationRequestSHA256 = requestSHA256
 	result.TargetSpecific = false
 	if result.Comments == nil {
 		result.Comments = []PromptOptimizerComment{}

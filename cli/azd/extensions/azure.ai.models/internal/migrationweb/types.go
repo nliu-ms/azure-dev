@@ -159,7 +159,6 @@ type DeploymentMetricsComparison struct {
 type ModelProvider interface {
 	ListResources(ctx context.Context) (ModelResourceList, error)
 	ListResourceDeployments(ctx context.Context, resource ModelAccount) (ModelList, error)
-	ListDeployments(ctx context.Context) (ModelList, error)
 	AssessTarget(ctx context.Context, request AssessmentRequest) (TargetAssessment, error)
 	AssessDeploymentOptions(ctx context.Context, request DeploymentOptionsRequest) (DeploymentOptions, error)
 	QueryDeploymentMetrics(

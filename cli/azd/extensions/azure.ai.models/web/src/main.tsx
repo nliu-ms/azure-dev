@@ -28,7 +28,7 @@ import { EvaluationMappingIntake } from "./EvaluationMappingIntake";
 import { appendMappedEvidence, createMappingDraft, type ConfirmedMapping } from "./evaluationMapping";
 import { buildPromptDiff } from "./promptDiff";
 import { PromptOptimizationRequest } from "./PromptOptimizationRequest";
-import { createOptimizationForm, type OptimizationPreview } from "./promptOptimization";
+import { createOptimizationForm } from "./promptOptimization";
 import { EvidenceNotes } from "./EvidenceNotes";
 import { TargetModelPicker } from "./TargetModelPicker";
 import { matchingTargetDeployments, targetModelChoices, targetModelKey, type TargetModelChoice } from "./targetModels";
@@ -187,7 +187,6 @@ type PromptOptimizationResult = {
   targetSpecific: boolean;
   promptSha256: string;
   evaluationSha256: string;
-  optimizationRequestSha256: string;
 };
 
 type TelemetryPreset = "1h" | "24h" | "7d" | "custom" | "evaluation";
@@ -1250,7 +1249,7 @@ function App() {
     }
   };
 
-  const optimizePrompt = async (preview: OptimizationPreview) => {
+  const optimizePrompt = async () => {
     if (
       !promptArtifact ||
       !mappingEvidence ||
@@ -1260,12 +1259,6 @@ function App() {
       !adaptTargetDeployment ||
       !promptOptimizerDeployment
     ) {
-      return;
-    }
-    if (!preview.withinLimit ||
-        preview.promptSha256 !== promptArtifact.sha256 ||
-        preview.evaluationSha256 !== evaluationAnalysis.evaluationSha256) {
-      setPromptOptimizationError("The reviewed optimization request is no longer current. Prepare it again.");
       return;
     }
     const requestId = ++promptOptimizationRequestId.current;
@@ -1290,7 +1283,6 @@ function App() {
         adaptTargetDeployment.modelName, promptOptimizerDeployment,
       );
       form.append("allowEvaluationContent", "true");
-      form.append("optimizationRequestSha256", preview.requestSha256);
       const response = await fetch("/api/prompt-optimization", {
         method: "POST",
         headers: {
@@ -1309,8 +1301,7 @@ function App() {
       }
       if (
         result.promptSha256 !== expectedPromptSHA256 ||
-        result.evaluationSha256 !== expectedEvaluationSHA256 ||
-        result.optimizationRequestSha256 !== preview.requestSha256
+        result.evaluationSha256 !== expectedEvaluationSHA256
       ) {
         throw new Error("The PromptV2 result does not match the currently loaded files.");
       }
@@ -2110,15 +2101,10 @@ function App() {
                 <section className="prompt-optimization adapt-step-panel" hidden={adaptStep !== "optimization"}>
                   {optimizationVisited && promptArtifact && mappingEvidence && adaptSourceDeployment && adaptTargetDeployment && (
                     <PromptOptimizationRequest
-                      token={token}
-                      prompt={promptArtifact}
-                      evidence={mappingEvidence}
                       analysis={evaluationAnalysis}
-                      sourceModel={adaptSourceDeployment.modelName}
-                      targetModel={adaptTargetDeployment.modelName}
                       optimizer={promptOptimizerDeployment}
                       optimizing={promptOptimizationLoading}
-                      onOptimize={(preview) => void optimizePrompt(preview)}
+                      onOptimize={() => void optimizePrompt()}
                     />
                   )}
 

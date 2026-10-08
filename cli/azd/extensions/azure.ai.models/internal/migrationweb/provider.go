@@ -478,64 +478,6 @@ func (p *AzureModelProvider) ListResourceDeployments(
 	}, nil
 }
 
-func (p *AzureModelProvider) ListDeployments(ctx context.Context) (ModelList, error) {
-	result := ModelList{
-		SubscriptionID: p.subscriptionID,
-		GeneratedAt:    time.Now().UTC(),
-		Accounts:       []ModelAccount{},
-		Models:         []ModelDeployment{},
-	}
-
-	var accounts []*armcognitiveservices.Account
-	accountPager := p.accounts.NewListPager(nil)
-	for accountPager.More() {
-		page, err := accountPager.NextPage(ctx)
-		if err != nil {
-			if len(accounts) == 0 {
-				return ModelList{}, fmt.Errorf("list Azure AI resources: %w", err)
-			}
-			result.Warnings = append(
-				result.Warnings,
-				fmt.Sprintf("Azure AI resource discovery stopped early: %v", err),
-			)
-			break
-		}
-		for _, account := range page.Value {
-			if isModelAccount(account) {
-				accounts = append(accounts, account)
-				if view, ok := modelAccountView(account); ok {
-					result.Accounts = append(result.Accounts, view)
-				}
-			}
-		}
-	}
-
-	models, warnings := scanModelAccounts(ctx, accounts, p.listAccountDeployments)
-	result.Models = append(result.Models, models...)
-	result.Warnings = append(result.Warnings, warnings...)
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		result.Warnings = append(
-			result.Warnings,
-			"Inventory scanning reached its time limit. Results may be incomplete.",
-		)
-	}
-
-	slices.SortFunc(result.Models, func(left, right ModelDeployment) int {
-		if left.AccountName != right.AccountName {
-			return cmp.Compare(left.AccountName, right.AccountName)
-		}
-		return cmp.Compare(left.DeploymentName, right.DeploymentName)
-	})
-	slices.SortFunc(result.Accounts, func(left, right ModelAccount) int {
-		if left.Name != right.Name {
-			return cmp.Compare(left.Name, right.Name)
-		}
-		return cmp.Compare(left.ResourceGroup, right.ResourceGroup)
-	})
-	slices.Sort(result.Warnings)
-	return result, nil
-}
-
 func modelAccountView(account *armcognitiveservices.Account) (ModelAccount, bool) {
 	if account == nil || account.ID == nil || account.Name == nil {
 		return ModelAccount{}, false
